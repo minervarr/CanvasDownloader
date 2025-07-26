@@ -1,0 +1,1 @@
+{"timestamp": "2025-07-26T17:11:56.803241", "level": "ERROR", "logger": "__main__", "message": "Failed to connect to Canvas", "module": "logger", "function": "_log", "line": 253, "thread_id": 140589811022784, "process_id": 9414, "data": {"exception_type": "InvalidAccessToken", "exception_message": "[{'m***.'}]", "traceback": "Trac***'}]\n"}, "context": {}}

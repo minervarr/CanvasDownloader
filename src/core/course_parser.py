@@ -500,3 +500,28 @@ class CourseParser:
         self.logger.info(f"Parsed {len(parsed_courses)} courses from {len(canvas_courses)} total")
 
         return parsed_courses
+
+
+def create_course_parser(config=None) -> CourseParser:
+    """
+    Factory function to create a CourseParser instance.
+
+    This factory function provides a consistent interface for creating
+    CourseParser instances throughout the application, following the
+    same pattern used by other modules.
+
+    Args:
+        config: Optional configuration object (currently unused but
+                provided for future extensibility)
+
+    Returns:
+        CourseParser: A new CourseParser instance
+
+    Example:
+        # Create a parser using the factory function
+        parser = create_course_parser()
+
+        # Parse a Canvas course object
+        parsed_course = parser.parse_course(canvas_course)
+    """
+    return CourseParser()
