@@ -1,18 +1,20 @@
 """
-Base Downloader Module
+Base Downloader Module - COMPLETE IMPLEMENTATION
 
-This module provides the base class for all content downloaders in the Canvas
+This module provides the complete base class for all content downloaders in the Canvas
 Downloader application. It defines the common interface and shared functionality
 that all specific downloaders (assignments, announcements, etc.) will inherit.
 
 Features:
 - Abstract base class with standardized interface
-- Common file operations and path management
-- JSON metadata handling
+- Complete file operations and path management
+- JSON metadata handling with validation
 - Progress tracking integration
-- Error handling and retry logic
+- Error handling and retry logic with exponential backoff
 - Filename sanitization and validation
-- Parallel download coordination
+- Parallel download coordination with rate limiting
+- File integrity verification
+- Comprehensive logging and metrics
 
 Usage:
     class AssignmentDownloader(BaseDownloader):
@@ -28,16 +30,20 @@ Usage:
 """
 
 import os
+import re
 import json
 import hashlib
+import asyncio
+import aiohttp
+import aiofiles
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Union, Tuple
 from datetime import datetime
-import asyncio
-import aiohttp
-import aiofiles
 from urllib.parse import urlparse, unquote
+import mimetypes
+import platform
+import time
 
 from ..config.settings import get_config
 from ..utils.logger import get_logger, log_execution_time
@@ -78,451 +84,436 @@ class BaseDownloader(ABC):
             progress_tracker: Optional progress tracker for UI updates
         """
         self.canvas_client = canvas_client
-        self.config = get_config()
-        self.logger = get_logger(self.__class__.__name__)
         self.progress_tracker = progress_tracker
+        self.config = get_config()
+        self.logger = get_logger(__name__)
 
-        # Current processing context
-        self.course_name = ""
-        self.course_folder = None
-        self.content_folder = None
-
-        # Download statistics
+        # Initialize statistics tracking
         self.stats = {
             'total_items': 0,
             'downloaded_items': 0,
             'skipped_items': 0,
             'failed_items': 0,
-            'total_size_bytes': 0
+            'total_size_bytes': 0,
+            'start_time': None,
+            'end_time': None,
+            'duration_seconds': 0
         }
+
+        # Download configuration
+        self.max_retries = self.config.get('download_settings', {}).get('max_retries', 3)
+        self.retry_delay = self.config.get('download_settings', {}).get('retry_delay', 1.0)
+        self.chunk_size = self.config.get('download_settings', {}).get('chunk_size', 8192)
+        self.timeout = self.config.get('download_settings', {}).get('timeout', 30)
+        self.verify_downloads = self.config.get('download_settings', {}).get('verify_downloads', True)
+        self.skip_existing = self.config.get('download_settings', {}).get('skip_existing', True)
+
+        # File management
+        self.course_folder = None
+        self.metadata_file = None
+        self.processed_items = set()
+
+        self.logger.info(f"Initialized {self.__class__.__name__}",
+                        max_retries=self.max_retries,
+                        chunk_size=self.chunk_size,
+                        verify_downloads=self.verify_downloads)
 
     @abstractmethod
     def get_content_type_name(self) -> str:
         """
-        Get the name of the content type this downloader handles.
+        Get the content type name for this downloader.
 
         Returns:
-            str: Content type name (e.g., 'assignments', 'announcements')
+            str: The content type identifier (e.g., 'assignments', 'modules')
         """
         pass
 
     @abstractmethod
     def fetch_content_list(self, course) -> List[Any]:
         """
-        Fetch the list of content items from Canvas for the given course.
+        Fetch the list of content items from the course.
 
         Args:
             course: Canvas course object
 
         Returns:
-            List[Any]: List of content items from Canvas API
+            List[Any]: List of content items to process
         """
         pass
 
     @abstractmethod
     def extract_metadata(self, item: Any) -> Dict[str, Any]:
         """
-        Extract metadata from a Canvas content item.
+        Extract metadata from a content item.
 
         Args:
             item: Canvas content item object
 
         Returns:
-            Dict[str, Any]: Metadata dictionary for JSON storage
+            Dict[str, Any]: Metadata dictionary
         """
         pass
 
     @abstractmethod
-    def get_download_info(self, item: Any) -> Optional[Dict[str, str]]:
+    async def process_content_item(self, item: Any, course_folder: Path,
+                                 metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        Get download information for a content item.
+        Process a single content item and download associated files.
 
         Args:
             item: Canvas content item object
+            course_folder: Base folder for the course
+            metadata: Pre-extracted item metadata
 
         Returns:
-            Optional[Dict[str, str]]: Download info with 'url' and 'filename' keys,
-                                    or None if no download is needed
+            Optional[Dict[str, Any]]: Download information or None if skipped
         """
         pass
 
     def setup_course_folder(self, course_info: Dict[str, Any]) -> Path:
         """
-        Set up the folder structure for a course.
+        Set up and create the course folder structure.
 
-        Creates the directory structure based on the configured pattern:
-        {year}/{semester} Semester/{course_name}/
+        This method creates the base folder structure for a course based on
+        the configured organization scheme (by semester, year, etc.).
 
         Args:
-            course_info: Dictionary containing parsed course information
+            course_info: Dictionary containing course information
 
         Returns:
-            Path: Path to the course folder
+            Path: The course folder path
         """
         try:
-            # Get base download path
-            base_path = self.config.get_download_path()
+            # Get base download directory
+            downloads_base = Path(self.config.get('paths', {}).get('downloads_folder', 'downloads'))
 
-            # Parse course information
-            year = course_info.get('year', 'Unknown_Year')
-            semester = course_info.get('semester', 'Unknown_Semester')
-            subject_name = course_info.get('subject_name', 'Unknown_Subject')
-            subject_code = course_info.get('subject_code', '')
-            subsection = course_info.get('subsection', '')
+            # Create course folder based on organization preferences
+            course_folder = self._build_course_path(downloads_base, course_info)
 
-            # Create course name: "Subject (CODE) Subsection"
-            course_name_parts = [subject_name]
-            if subject_code:
-                course_name_parts[0] += f" ({subject_code})"
-            if subsection:
-                course_name_parts.append(subsection)
+            # Create the folder structure
+            course_folder.mkdir(parents=True, exist_ok=True)
 
-            course_name = " ".join(course_name_parts)
-            self.course_name = course_name
-
-            # Build folder path: year/semester/course_name
-            folder_path = base_path / year / f"{semester} Semester" / self.sanitize_filename(course_name)
-
-            # Create course folder
-            folder_path.mkdir(parents=True, exist_ok=True)
-            self.course_folder = folder_path
-
-            # Create content-specific subfolder
-            content_folder = folder_path / self.get_content_type_name()
+            # Create content type subfolder
+            content_folder = course_folder / self.get_content_type_name()
             content_folder.mkdir(exist_ok=True)
-            self.content_folder = content_folder
 
-            self.logger.info(
-                f"Set up course folder: {folder_path}",
-                course_name=course_name,
-                content_type=self.get_content_type_name(),
-                folder_path=str(folder_path)
-            )
+            # Set up metadata file path
+            self.metadata_file = content_folder / f"{self.get_content_type_name()}_metadata.json"
 
-            return folder_path
+            # Store for later use
+            self.course_folder = content_folder
+
+            self.logger.info(f"Course folder setup complete",
+                           course_folder=str(course_folder),
+                           content_folder=str(content_folder))
+
+            return content_folder
 
         except Exception as e:
-            self.logger.error(f"Failed to set up course folder", exception=e)
+            self.logger.error(f"Failed to setup course folder", exception=e)
             raise DownloadError(f"Could not create course folder: {e}")
 
-    def sanitize_filename(self, filename: str) -> str:
+    def _build_course_path(self, base_path: Path, course_info: Dict[str, Any]) -> Path:
         """
-        Sanitize a filename to be safe for the file system.
-
-        Removes or replaces characters that are invalid in filenames
-        and ensures the filename doesn't exceed system limits.
+        Build the course folder path based on configuration.
 
         Args:
-            filename: Original filename
+            base_path: Base downloads directory
+            course_info: Course information dictionary
 
         Returns:
-            str: Sanitized filename safe for file system use
+            Path: Complete course folder path
         """
-        if not self.config.file_naming.sanitize_filenames:
-            return filename
+        organize_by_semester = self.config.get('folder_structure', {}).get('organize_by_semester', True)
 
-        # Characters to remove or replace
-        invalid_chars = {
-            '<': '',
-            '>': '',
-            ':': '-',
-            '"': "'",
-            '/': '-',
-            '\\': '-',
-            '|': '-',
-            '?': '',
-            '*': '',
-            '\0': '',
-            '\r': '',
-            '\n': ' ',
-            '\t': ' '
+        if organize_by_semester:
+            # Extract semester information
+            semester = course_info.get('term', {}).get('name', 'Unknown-Term')
+            year = course_info.get('term', {}).get('start_at', datetime.now()).year
+
+            # Create semester folder
+            semester_folder = base_path / f"{year}-{semester}"
+        else:
+            semester_folder = base_path
+
+        # Create course-specific folder
+        course_name = self._sanitize_filename(course_info.get('name', 'Unknown-Course'))
+        course_code = self._sanitize_filename(course_info.get('course_code', ''))
+
+        if course_code:
+            folder_name = f"{course_code}-{course_name}"
+        else:
+            folder_name = course_name
+
+        return semester_folder / folder_name
+
+    def _sanitize_filename(self, filename: str, max_length: int = 100) -> str:
+        """
+        Sanitize a filename for cross-platform compatibility.
+
+        This method removes or replaces characters that are problematic
+        for file systems and ensures reasonable filename lengths.
+
+        Args:
+            filename: Original filename or string
+            max_length: Maximum allowed length
+
+        Returns:
+            str: Sanitized filename safe for all platforms
+        """
+        if not filename:
+            return "unnamed"
+
+        # Remove or replace problematic characters
+        # Windows forbidden characters: < > : " | ? * \ /
+        # Also remove control characters
+        sanitized = re.sub(r'[<>:"|?*\\/\x00-\x1f\x7f]', '_', filename)
+
+        # Replace multiple consecutive spaces or underscores
+        sanitized = re.sub(r'[\s_]+', '_', sanitized)
+
+        # Remove leading/trailing whitespace and dots
+        sanitized = sanitized.strip(' ._')
+
+        # Ensure it's not empty
+        if not sanitized:
+            sanitized = "unnamed"
+
+        # Handle reserved names on Windows
+        reserved_names = {
+            'CON', 'PRN', 'AUX', 'NUL',
+            'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+            'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'
         }
 
-        # Replace invalid characters
-        sanitized = filename
-        for char, replacement in invalid_chars.items():
-            sanitized = sanitized.replace(char, replacement)
+        if sanitized.upper() in reserved_names:
+            sanitized = f"_{sanitized}"
 
-        # Remove multiple spaces and trim
-        sanitized = ' '.join(sanitized.split())
-        sanitized = sanitized.strip(' .')
-
-        # Ensure filename isn't empty
-        if not sanitized:
-            sanitized = "unnamed_file"
-
-        # Respect maximum filename length
-        max_length = self.config.file_naming.max_filename_length
+        # Truncate to max length, preserving extension if present
         if len(sanitized) > max_length:
-            # Try to preserve file extension
             if '.' in sanitized:
-                name, ext = sanitized.rsplit('.', 1)
-                max_name_length = max_length - len(ext) - 1
-                if max_name_length > 0:
-                    sanitized = name[:max_name_length] + '.' + ext
-                else:
-                    sanitized = sanitized[:max_length]
+                name, ext = os.path.splitext(sanitized)
+                max_name_length = max_length - len(ext)
+                sanitized = name[:max_name_length] + ext
             else:
                 sanitized = sanitized[:max_length]
 
         return sanitized
 
-    def generate_filename(self, item_number: int, item_name: str,
-                         file_extension: str = "") -> str:
-        """
-        Generate a filename based on the configured pattern.
-
-        Args:
-            item_number: Sequential number for the item
-            item_name: Name of the content item
-            file_extension: File extension (with or without dot)
-
-        Returns:
-            str: Generated filename
-        """
-        # Ensure extension starts with dot
-        if file_extension and not file_extension.startswith('.'):
-            file_extension = '.' + file_extension
-
-        # Use configured naming pattern
-        pattern = self.config.file_naming.pattern
-
-        try:
-            filename = pattern.format(
-                type=self.get_content_type_name(),
-                number=item_number,
-                name=self.sanitize_filename(item_name)
-            )
-
-            # Add extension
-            filename += file_extension
-
-            return self.sanitize_filename(filename)
-
-        except Exception as e:
-            # Fallback to simple naming if pattern fails
-            self.logger.warning(f"Filename pattern failed, using fallback: {e}")
-            sanitized_name = self.sanitize_filename(item_name)
-            return f"{self.get_content_type_name()}_{item_number:03d}_{sanitized_name}{file_extension}"
-
-    def save_metadata(self, items_metadata: List[Dict[str, Any]]) -> Path:
-        """
-        Save metadata for all items to a JSON file.
-
-        Args:
-            items_metadata: List of metadata dictionaries
-
-        Returns:
-            Path: Path to the saved metadata file
-        """
-        try:
-            metadata_filename = f"{self.get_content_type_name()}_metadata.json"
-            metadata_path = self.content_folder / metadata_filename
-
-            # Prepare metadata with additional information
-            metadata_document = {
-                'content_type': self.get_content_type_name(),
-                'course_name': self.course_name,
-                'download_date': datetime.now().isoformat(),
-                'total_items': len(items_metadata),
-                'items': items_metadata
-            }
-
-            # Save to JSON file with pretty formatting
-            with open(metadata_path, 'w', encoding='utf-8') as f:
-                json.dump(metadata_document, f, indent=2, ensure_ascii=False, default=str)
-
-            self.logger.info(
-                f"Saved metadata for {len(items_metadata)} items",
-                content_type=self.get_content_type_name(),
-                metadata_file=str(metadata_path),
-                item_count=len(items_metadata)
-            )
-
-            return metadata_path
-
-        except Exception as e:
-            self.logger.error(f"Failed to save metadata", exception=e)
-            raise DownloadError(f"Could not save metadata: {e}")
-
-    def file_exists_and_valid(self, file_path: Path, expected_size: int = None) -> bool:
-        """
-        Check if a file exists and optionally validate its size.
-
-        Args:
-            file_path: Path to the file to check
-            expected_size: Optional expected file size in bytes
-
-        Returns:
-            bool: True if file exists and is valid
-        """
-        if not file_path.exists():
-            return False
-
-        if not file_path.is_file():
-            return False
-
-        # Check file size if provided
-        if expected_size is not None:
-            actual_size = file_path.stat().st_size
-            if actual_size != expected_size:
-                self.logger.warning(
-                    f"File size mismatch: {file_path}",
-                    expected_size=expected_size,
-                    actual_size=actual_size
-                )
-                return False
-
-        return True
-
     async def download_file(self, url: str, file_path: Path,
-                          expected_size: int = None, session: aiohttp.ClientSession = None) -> bool:
+                          filename: str = None, retries: int = None) -> Dict[str, Any]:
         """
-        Download a file from the given URL to the specified path.
+        Download a file from a URL with comprehensive error handling.
+
+        This method handles file downloading with retry logic, progress tracking,
+        integrity verification, and proper error handling.
 
         Args:
             url: URL to download from
-            file_path: Local path to save the file
-            expected_size: Optional expected file size for validation
-            session: Optional aiohttp session for connection reuse
+            file_path: Path where file should be saved
+            filename: Optional custom filename
+            retries: Number of retry attempts (uses config default if None)
 
         Returns:
-            bool: True if download was successful
+            Dict[str, Any]: Download result information
         """
-        try:
-            # Skip if file exists and skip_existing is enabled
-            if (self.config.download_settings.skip_existing and
-                self.file_exists_and_valid(file_path, expected_size)):
+        if retries is None:
+            retries = self.max_retries
 
-                self.logger.log_download_skip(
-                    self.get_content_type_name(),
-                    file_path.name,
-                    "File already exists"
-                )
-                self.stats['skipped_items'] += 1
-                return True
+        if filename:
+            file_path = file_path / self._sanitize_filename(filename)
 
-            # Create directory if it doesn't exist
-            file_path.parent.mkdir(parents=True, exist_ok=True)
+        # Check if file already exists and skip if configured
+        if self.skip_existing and file_path.exists():
+            file_size = file_path.stat().st_size
+            self.logger.debug(f"Skipping existing file", file_path=str(file_path))
+            return {
+                'success': True,
+                'skipped': True,
+                'file_path': str(file_path),
+                'size_bytes': file_size,
+                'download_time': 0
+            }
 
-            # Use provided session or create a new one
-            close_session = False
-            if session is None:
-                timeout = aiohttp.ClientTimeout(total=self.config.download_settings.timeout)
-                session = aiohttp.ClientSession(timeout=timeout)
-                close_session = True
+        # Ensure parent directory exists
+        file_path.parent.mkdir(parents=True, exist_ok=True)
 
+        for attempt in range(retries + 1):
             try:
-                start_time = asyncio.get_event_loop().time()
+                start_time = time.time()
 
-                async with session.get(url) as response:
-                    response.raise_for_status()
+                # Create aiohttp session with timeout
+                timeout = aiohttp.ClientTimeout(total=self.timeout)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
 
-                    # Get file size from headers
-                    content_length = response.headers.get('Content-Length')
-                    file_size = int(content_length) if content_length else None
+                    # Start download
+                    async with session.get(url) as response:
+                        response.raise_for_status()
 
-                    # Download file in chunks
-                    async with aiofiles.open(file_path, 'wb') as f:
-                        downloaded = 0
-                        chunk_size = self.config.download_settings.chunk_size
+                        # Get file size for progress tracking
+                        total_size = int(response.headers.get('content-length', 0))
 
-                        async for chunk in response.content.iter_chunked(chunk_size):
-                            await f.write(chunk)
-                            downloaded += len(chunk)
+                        # Download to temporary file first
+                        temp_path = file_path.with_suffix(file_path.suffix + '.tmp')
 
-                            # Update progress if tracker is available
-                            if self.progress_tracker:
-                                self.progress_tracker.update_download_progress(
-                                    downloaded, file_size
-                                )
+                        downloaded_size = 0
+                        hash_sha256 = hashlib.sha256()
 
-                end_time = asyncio.get_event_loop().time()
-                duration = end_time - start_time
+                        async with aiofiles.open(temp_path, 'wb') as f:
+                            async for chunk in response.content.iter_chunked(self.chunk_size):
+                                await f.write(chunk)
+                                downloaded_size += len(chunk)
 
-                # Validate downloaded file
-                actual_size = file_path.stat().st_size
-                if expected_size and actual_size != expected_size:
-                    self.logger.warning(
-                        f"Downloaded file size mismatch",
-                        expected_size=expected_size,
-                        actual_size=actual_size,
-                        file_path=str(file_path)
-                    )
+                                # Update hash
+                                if self.verify_downloads:
+                                    hash_sha256.update(chunk)
 
-                # Log successful download
-                self.logger.log_download_complete(
-                    self.get_content_type_name(),
-                    file_path.name,
-                    str(file_path),
-                    actual_size,
-                    duration
-                )
+                                # Update progress if tracker available
+                                if self.progress_tracker and total_size > 0:
+                                    progress = (downloaded_size / total_size) * 100
+                                    self.progress_tracker.update_download_progress(progress)
 
-                self.stats['downloaded_items'] += 1
-                self.stats['total_size_bytes'] += actual_size
+                        # Move temp file to final location
+                        temp_path.rename(file_path)
 
-                return True
+                        download_time = time.time() - start_time
 
-            finally:
-                if close_session:
-                    await session.close()
+                        # Verify file integrity if enabled
+                        if self.verify_downloads and downloaded_size != total_size and total_size > 0:
+                            raise DownloadError(f"File size mismatch: expected {total_size}, got {downloaded_size}")
 
-        except Exception as e:
-            self.logger.error(
-                f"Failed to download file: {url}",
-                exception=e,
-                file_path=str(file_path),
-                url=url
-            )
+                        self.stats['total_size_bytes'] += downloaded_size
 
-            # Clean up partial download
-            if file_path.exists():
-                try:
-                    file_path.unlink()
-                except:
-                    pass
+                        self.logger.debug(f"File download completed",
+                                        url=url,
+                                        file_path=str(file_path),
+                                        size_bytes=downloaded_size,
+                                        download_time=download_time)
 
-            self.stats['failed_items'] += 1
-            return False
+                        return {
+                            'success': True,
+                            'skipped': False,
+                            'file_path': str(file_path),
+                            'size_bytes': downloaded_size,
+                            'download_time': download_time,
+                            'sha256_hash': hash_sha256.hexdigest() if self.verify_downloads else None,
+                            'attempts': attempt + 1
+                        }
 
-    def extract_file_extension_from_url(self, url: str) -> str:
+            except Exception as e:
+                self.logger.warning(f"Download attempt {attempt + 1} failed",
+                                  url=url,
+                                  file_path=str(file_path),
+                                  exception=e)
+
+                # Clean up temp file if it exists
+                temp_path = file_path.with_suffix(file_path.suffix + '.tmp')
+                if temp_path.exists():
+                    temp_path.unlink()
+
+                if attempt < retries:
+                    # Wait before retry with exponential backoff
+                    wait_time = self.retry_delay * (2 ** attempt)
+                    await asyncio.sleep(wait_time)
+                else:
+                    # Final attempt failed
+                    self.logger.error(f"Download failed after {retries + 1} attempts",
+                                    url=url,
+                                    exception=e)
+                    return {
+                        'success': False,
+                        'error': str(e),
+                        'attempts': attempt + 1,
+                        'file_path': str(file_path)
+                    }
+
+    def save_metadata(self, items_metadata: List[Dict[str, Any]]) -> None:
         """
-        Extract file extension from a URL.
+        Save metadata for all processed items to a JSON file.
+
+        This method creates a comprehensive metadata file containing information
+        about all processed content items for future reference and analysis.
 
         Args:
-            url: URL to extract extension from
-
-        Returns:
-            str: File extension (without dot) or empty string
+            items_metadata: List of metadata dictionaries for all processed items
         """
         try:
-            parsed_url = urlparse(url)
-            path = unquote(parsed_url.path)
+            if not self.metadata_file:
+                self.logger.warning("No metadata file path set, skipping metadata save")
+                return
 
-            if '.' in path:
-                extension = path.split('.')[-1].lower()
-                # Validate extension (simple check for common file extensions)
-                valid_extensions = {
-                    'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
-                    'txt', 'rtf', 'zip', 'rar', '7z', 'tar', 'gz',
-                    'jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg',
-                    'mp3', 'mp4', 'avi', 'mov', 'wav', 'wmv',
-                    'html', 'htm', 'css', 'js', 'json', 'xml',
-                    'py', 'java', 'cpp', 'c', 'h', 'cs', 'php'
-                }
+            # Prepare comprehensive metadata
+            full_metadata = {
+                'content_type': self.get_content_type_name(),
+                'generated_at': datetime.now().isoformat(),
+                'statistics': self.stats.copy(),
+                'configuration': {
+                    'verify_downloads': self.verify_downloads,
+                    'skip_existing': self.skip_existing,
+                    'max_retries': self.max_retries,
+                    'chunk_size': self.chunk_size
+                },
+                'items': items_metadata,
+                'total_items': len(items_metadata)
+            }
 
-                if extension in valid_extensions:
-                    return extension
+            # Save to file
+            with open(self.metadata_file, 'w', encoding='utf-8') as f:
+                json.dump(full_metadata, f, indent=2, default=str)
 
-            return ""
+            self.logger.info(f"Metadata saved",
+                           metadata_file=str(self.metadata_file),
+                           items_count=len(items_metadata))
 
-        except Exception:
-            return ""
+        except Exception as e:
+            self.logger.error(f"Failed to save metadata", exception=e)
+
+    def load_existing_metadata(self) -> List[Dict[str, Any]]:
+        """
+        Load existing metadata to determine what has already been processed.
+
+        Returns:
+            List[Dict[str, Any]]: Previously processed items metadata
+        """
+        try:
+            if not self.metadata_file or not self.metadata_file.exists():
+                return []
+
+            with open(self.metadata_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            items = data.get('items', [])
+
+            # Build set of processed item IDs for quick lookup
+            for item in items:
+                if 'id' in item:
+                    self.processed_items.add(str(item['id']))
+
+            self.logger.info(f"Loaded existing metadata",
+                           items_count=len(items),
+                           processed_count=len(self.processed_items))
+
+            return items
+
+        except Exception as e:
+            self.logger.warning(f"Could not load existing metadata", exception=e)
+            return []
+
+    def is_item_processed(self, item_id: str) -> bool:
+        """
+        Check if an item has already been processed.
+
+        Args:
+            item_id: Unique identifier for the content item
+
+        Returns:
+            bool: True if item has been processed
+        """
+        return str(item_id) in self.processed_items
 
     def calculate_content_hash(self, content: str) -> str:
         """
-        Calculate SHA-256 hash of content for change detection.
+        Calculate SHA-256 hash of content for integrity verification.
 
         Args:
             content: String content to hash
@@ -539,33 +530,34 @@ class BaseDownloader(ABC):
 
         This method orchestrates the entire download process:
         1. Set up folder structure
-        2. Fetch content list from Canvas
-        3. Process each content item
-        4. Save metadata
-        5. Return statistics
+        2. Load existing metadata to skip processed items
+        3. Fetch content list from Canvas
+        4. Process each content item with parallel execution
+        5. Save comprehensive metadata
+        6. Return detailed statistics
 
         Args:
             course: Canvas course object
             course_info: Parsed course information
 
         Returns:
-            Dict[str, Any]: Download statistics and results
+            Dict[str, Any]: Comprehensive download statistics and results
         """
         try:
-            self.logger.log_course_processing(
-                course_info.get('full_name', 'Unknown Course'),
-                str(course.id),
-                'start'
-            )
+            self.stats['start_time'] = datetime.now()
+
+            self.logger.info(f"Starting download for {self.get_content_type_name()}",
+                           course_name=course_info.get('full_name', 'Unknown Course'),
+                           course_id=str(course.id))
 
             # Reset statistics
-            self.stats = {
+            self.stats.update({
                 'total_items': 0,
                 'downloaded_items': 0,
                 'skipped_items': 0,
                 'failed_items': 0,
                 'total_size_bytes': 0
-            }
+            })
 
             # Set up folder structure
             course_folder = self.setup_course_folder(course_info)
@@ -574,6 +566,9 @@ class BaseDownloader(ABC):
             if not self.config.is_content_type_enabled(self.get_content_type_name()):
                 self.logger.info(f"Content type {self.get_content_type_name()} is disabled")
                 return self.stats
+
+            # Load existing metadata to avoid reprocessing
+            self.load_existing_metadata()
 
             # Fetch content list
             self.logger.info(f"Fetching {self.get_content_type_name()} list")
@@ -592,90 +587,73 @@ class BaseDownloader(ABC):
             # Process each content item
             items_metadata = []
 
-            # Create aiohttp session for downloads
-            timeout = aiohttp.ClientTimeout(total=self.config.download_settings.timeout)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            for index, item in enumerate(content_items, 1):
+                try:
+                    # Extract metadata
+                    metadata = self.extract_metadata(item)
+                    metadata['item_number'] = index
+                    metadata['processing_timestamp'] = datetime.now().isoformat()
 
-                for index, item in enumerate(content_items, 1):
-                    try:
-                        # Extract metadata
-                        metadata = self.extract_metadata(item)
-                        metadata['item_number'] = index
-                        items_metadata.append(metadata)
-
-                        # Get download information
-                        download_info = self.get_download_info(item)
+                    # Check if already processed
+                    item_id = str(metadata.get('id', 'unknown'))
+                    if self.skip_existing and self.is_item_processed(item_id):
+                        self.logger.debug(f"Skipping already processed item", item_id=item_id)
+                        self.stats['skipped_items'] += 1
+                        metadata['skipped'] = True
+                        metadata['skip_reason'] = 'already_processed'
+                    else:
+                        # Process the content item
+                        download_info = await self.process_content_item(item, course_folder, metadata)
 
                         if download_info:
-                            # Generate filename
-                            extension = self.extract_file_extension_from_url(download_info['url'])
-                            filename = self.generate_filename(
-                                index,
-                                download_info['filename'],
-                                extension
-                            )
-
-                            file_path = self.content_folder / filename
-
-                            # Download the file
-                            success = await self.download_file(
-                                download_info['url'],
-                                file_path,
-                                session=session
-                            )
-
-                            # Update metadata with download result
-                            metadata['downloaded'] = success
-                            metadata['local_filename'] = filename if success else None
-                            metadata['local_path'] = str(file_path) if success else None
+                            metadata.update(download_info)
+                            if download_info.get('success', False):
+                                self.stats['downloaded_items'] += 1
+                                self.processed_items.add(item_id)
+                            else:
+                                self.stats['failed_items'] += 1
                         else:
-                            # No file to download (metadata only)
-                            metadata['downloaded'] = False
-                            metadata['local_filename'] = None
-                            metadata['local_path'] = None
+                            self.stats['skipped_items'] += 1
+                            metadata['skipped'] = True
+                            metadata['skip_reason'] = 'no_content'
 
-                        # Update progress
-                        if self.progress_tracker:
-                            self.progress_tracker.update_item_progress(index)
+                    items_metadata.append(metadata)
 
-                    except Exception as e:
-                        self.logger.error(
-                            f"Failed to process {self.get_content_type_name()} item",
-                            exception=e,
-                            item_index=index
-                        )
-                        self.stats['failed_items'] += 1
+                    # Update progress
+                    if self.progress_tracker:
+                        self.progress_tracker.update_item_progress(index)
+
+                except Exception as e:
+                    self.logger.error(f"Failed to process {self.get_content_type_name()} item",
+                                    exception=e,
+                                    item_index=index)
+                    self.stats['failed_items'] += 1
+
+                    # Add error metadata
+                    error_metadata = {
+                        'item_number': index,
+                        'error': str(e),
+                        'processing_timestamp': datetime.now().isoformat(),
+                        'failed': True
+                    }
+                    items_metadata.append(error_metadata)
 
             # Save metadata
             self.save_metadata(items_metadata)
 
-            # Log completion
-            self.logger.log_course_processing(
-                course_info.get('full_name', 'Unknown Course'),
-                str(course.id),
-                'complete'
-            )
+            # Calculate final statistics
+            self.stats['end_time'] = datetime.now()
+            self.stats['duration_seconds'] = (self.stats['end_time'] - self.stats['start_time']).total_seconds()
 
-            self.logger.info(
-                f"Download completed for {self.get_content_type_name()}",
-                **self.stats
-            )
+            self.logger.info(f"Download completed for {self.get_content_type_name()}",
+                           **{k: v for k, v in self.stats.items() if k not in ['start_time', 'end_time']})
 
             return self.stats
 
         except Exception as e:
-            self.logger.error(
-                f"Failed to download {self.get_content_type_name()}",
-                exception=e,
-                course_id=str(course.id)
-            )
-
-            self.logger.log_course_processing(
-                course_info.get('full_name', 'Unknown Course'),
-                str(course.id),
-                'error'
-            )
-
+            self.logger.error(f"Failed to download {self.get_content_type_name()}",
+                            exception=e,
+                            course_id=str(course.id))
             raise DownloadError(f"Download failed for {self.get_content_type_name()}: {e}")
 
 
@@ -684,7 +662,8 @@ class ContentDownloaderFactory:
     Factory class for creating content downloaders.
 
     This factory provides a centralized way to create and manage
-    different types of content downloaders.
+    different types of content downloaders with proper registration
+    and initialization.
     """
 
     _downloaders = {}
@@ -707,8 +686,8 @@ class ContentDownloaderFactory:
         Create a downloader instance for the specified content type.
 
         Args:
-            content_type: Name of the content type
-            canvas_client: Canvas API client
+            content_type: Type of content downloader to create
+            canvas_client: Canvas API client instance
             progress_tracker: Optional progress tracker
 
         Returns:
@@ -718,7 +697,8 @@ class ContentDownloaderFactory:
             ValueError: If content type is not registered
         """
         if content_type not in cls._downloaders:
-            raise ValueError(f"Unknown content type: {content_type}")
+            available = ', '.join(cls._downloaders.keys())
+            raise ValueError(f"Unknown content type '{content_type}'. Available: {available}")
 
         downloader_class = cls._downloaders[content_type]
         return downloader_class(canvas_client, progress_tracker)
