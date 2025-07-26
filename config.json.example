@@ -1,0 +1,36 @@
+{
+    "download_settings": {
+        "base_download_path": "./downloads",
+        "parallel_downloads": 3,
+        "chunk_size": 8192,
+        "retry_attempts": 3,
+        "timeout": 30,
+        "skip_existing": true
+    },
+    "file_naming": {
+        "pattern": "{type}_{number:03d}_{name}",
+        "sanitize_filenames": true,
+        "max_filename_length": 255
+    },
+    "content_types": {
+        "announcements": true,
+        "modules": true,
+        "assignments": true,
+        "quizzes": true,
+        "discussions": true,
+        "grades": true,
+        "people": true,
+        "chat": true
+    },
+    "date_format": {
+        "locale": "en_US",
+        "format": "%Y-%m-%d",
+        "folder_structure": "{year}/{semester} Semester/{course_name}"
+    },
+    "logging": {
+        "level": "INFO",
+        "file": "logs/canvas_downloader.log",
+        "max_size": "10MB",
+        "backup_count": 5
+    }
+}
