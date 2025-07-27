@@ -24,6 +24,7 @@ from typing import Dict, List, Any, Optional, Union
 from urllib.parse import urljoin, urlparse, unquote
 
 import aiofiles
+from canvasapi import course
 
 try:
     import markdownify
@@ -67,6 +68,7 @@ class ModulesDownloader(BaseDownloader):
     def __init__(self, canvas_client, progress_tracker=None):
         """Initialize the enhanced modules downloader."""
         super().__init__(canvas_client, progress_tracker)
+        self.canvas_client = canvas_client  # Store Canvas client for URL resolution
         self.logger = get_logger(__name__)
 
         # Original settings
@@ -86,11 +88,11 @@ class ModulesDownloader(BaseDownloader):
         self.base_url = None
         self._setup_web_session()
 
-        self.logger.info("ENHANCED Modules downloader initialized",
-                        markdown_available=MARKDOWNIFY_AVAILABLE,
-                        download_items=self.download_module_items,
-                        web_extraction=self.use_web_extraction,
-                        cookies_available=self.cookies_path.exists())
+        self.logger.info("ENHANCED Modules downloader initialized (WITH URL RESOLUTION)",
+                       markdown_available=MARKDOWNIFY_AVAILABLE,
+                       download_items=self.download_module_items,
+                       web_extraction=self.use_web_extraction,
+                       cookies_available=hasattr(self, 'session') and bool(self.session.cookies))
 
     def _setup_web_session(self):
         """Set up web session with cookies for scraping."""
@@ -249,6 +251,61 @@ class ModulesDownloader(BaseDownloader):
         except Exception as e:
             self.logger.error(f"Enhanced modules download failed", exception=e)
             raise DownloadError(f"Enhanced modules download failed: {e}")
+
+    def _resolve_canvas_file_url(self, url: str, course_id: str) -> str:
+        """
+        CORE FIX: Visit module item page and extract actual download URL.
+        """
+        try:
+            # Check if this is a Canvas module item URL
+            module_item_match = re.search(r'/courses/(\d+)/modules/items/(\d+)', url)
+            if not module_item_match:
+                return url
+
+            self.logger.info(f"🔍 Visiting module item page: {url}")
+
+            # Visit the module item page using the correct session
+            response = self.web_session.get(url, timeout=30)
+            response.raise_for_status()
+
+            self.logger.info(f"📄 Response size: {len(response.content)} bytes")
+
+            # Parse the HTML to find the download link
+            if BEAUTIFULSOUP_AVAILABLE:
+                soup = BeautifulSoup(response.content, 'html.parser')
+
+                # Look for the exact pattern: <a download="true" href="/courses/17926/files/3636002/download?download_frd=1">
+                download_links = soup.find_all('a', {'download': 'true',
+                                                     'href': re.compile(r'/courses/\d+/files/\d+/download')})
+                self.logger.info(f"🔗 Found {len(download_links)} download links with download='true'")
+
+                if download_links:
+                    download_href = download_links[0].get('href')
+                    if download_href.startswith('/'):
+                        download_url = urljoin(self.base_url, download_href)
+                    else:
+                        download_url = download_href
+
+                    self.logger.info(f"✅ FOUND REAL DOWNLOAD URL: {download_url}")
+                    return download_url
+                else:
+                    # Fallback: look for any /files/*/download links
+                    fallback_links = soup.find_all('a', href=re.compile(r'/files/\d+/download'))
+                    self.logger.info(f"🔗 Fallback: Found {len(fallback_links)} /files/*/download links")
+                    if fallback_links:
+                        download_href = fallback_links[0].get('href')
+                        download_url = urljoin(self.base_url, download_href) if download_href.startswith(
+                            '/') else download_href
+                        self.logger.info(f"✅ FOUND FALLBACK DOWNLOAD URL: {download_url}")
+                        return download_url
+
+            # If no download link found, return original URL
+            self.logger.info(f"❌ No download link found in module item page")
+            return url
+
+        except Exception as e:
+            self.logger.error(f"Error resolving Canvas file URL: {e}")
+            return url
 
     async def _process_module_enhanced(self, module: Module, metadata: Dict[str, Any],
                                      index: int, course) -> int:
@@ -423,7 +480,8 @@ To enable file downloads:
                             'filename': filename,
                             'type': 'detected_file',
                             'title': link_text[:100],
-                            'method': 'broad_detection'
+                            'method': 'broad_detection',
+                            'course_id': str(getattr(module, 'course_id', '')) if hasattr(module, 'course_id') else ''
                         }
                         file_links.append(file_info)
                         self.logger.info(f"DEBUGGING: Found file link: {filename} -> {href[:100]}...")
@@ -463,7 +521,8 @@ To enable file downloads:
                             'filename': filename,
                             'type': pattern['method'],
                             'title': element.get_text(strip=True)[:100],
-                            'method': pattern['method']
+                            'method': pattern['method'],
+                            'course_id': str(getattr(module, 'course_id', '')) if hasattr(module, 'course_id') else ''
                         }
                         file_links.append(file_info)
                         self.logger.info(f"DEBUGGING: {pattern['method']} found: {filename}")
@@ -573,6 +632,14 @@ To enable file downloads:
                 counter += 1
 
             self.logger.info(f"Downloading file: {filename}")
+
+            # CORE FIX: Resolve module item URLs to actual download URLs
+            course_id = file_info.get('course_id', '')
+            if course_id and '/modules/items/' in url:
+                resolved_url = self._resolve_canvas_file_url(url, course_id)
+                if resolved_url != url:
+                    self.logger.info(f"🔄 URL RESOLVED: {filename}")
+                    url = resolved_url
 
             # Download the file
             response = self.web_session.get(url, stream=True, timeout=60)
