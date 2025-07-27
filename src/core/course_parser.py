@@ -401,6 +401,99 @@ class CourseParser:
                 full_name='Unknown Course'
             )
 
+    def parse_course_name(self, course_name: str, course_id: str) -> ParsedCourseName:
+        """
+        Parse course name into components for orchestrator compatibility.
+
+        Expected format: "Subject name (CODE) - Subsection - Year - Semester"
+        Example: "Arte y Tecnología (HH3101) - Teoría 1 - 2025 - 1"
+
+        Args:
+            course_name: Full course name from Canvas
+            course_id: Course ID for folder naming
+
+        Returns:
+            ParsedCourseName: Parsed course components with folder paths
+        """
+        try:
+            self.logger.debug(f"Parsing course name: {course_name}")
+
+            # Initialize result with defaults
+            result = ParsedCourseName()
+            result.full_name = course_name
+            result.subject_name = course_name  # Default fallback
+
+            # Regular expression patterns for parsing
+            # Pattern 1: Full format - Subject (CODE) - Section - Year - Semester
+            full_pattern = r'^(.+?)\s*\(([^)]+)\)\s*-\s*(.+?)\s*-\s*(\d{4})\s*-\s*(\d+)$'
+
+            # Pattern 2: Subject (CODE) only
+            code_pattern = r'^(.+?)\s*\(([^)]+)\)'
+
+            # Pattern 3: Just subject name
+            name_pattern = r'^(.+?)$'
+
+            # Try parsing with full pattern first
+            match = re.match(full_pattern, course_name.strip())
+            if match:
+                result.subject_name = match.group(1).strip()
+                result.subject_code = match.group(2).strip()
+                result.subsection = match.group(3).strip()
+                result.year = match.group(4).strip()
+                result.semester = match.group(5).strip()
+                result.is_parsed_successfully = True
+
+                # Generate folder name - remove UNKNOWN prefix
+                if result.subject_code and result.subject_name:
+                    result.folder_name = f"{result.subject_code} - {result.subject_name}"
+                    if result.year and result.semester:
+                        result.folder_name += f" - {result.year}-{result.semester}"
+                elif result.subject_code:
+                    result.folder_name = result.subject_code
+                elif result.subject_name:
+                    result.folder_name = result.subject_name
+                else:
+                    # Use course name without UNKNOWN prefix
+                    result.folder_name = self._sanitize_folder_name(course_name)
+
+            else:
+                # Try parsing with code pattern
+                match = re.match(code_pattern, course_name.strip())
+                if match:
+                    result.subject_name = match.group(1).strip()
+                    result.subject_code = match.group(2).strip()
+                    result.is_parsed_successfully = True
+                    result.folder_name = f"{result.subject_code} - {result.subject_name}"
+                else:
+                    # Fallback: use full name as subject name
+                    result.subject_name = course_name.strip()
+                    result.is_parsed_successfully = False
+                    result.folder_name = self._sanitize_folder_name(course_name)
+
+            # Generate folder path
+            result.folder_path = str(Path(result.folder_name))
+
+            self.logger.debug(f"Parsed course name successfully",
+                              course_name=course_name,
+                              subject_code=result.subject_code,
+                              subject_name=result.subject_name,
+                              folder_name=result.folder_name)
+
+            return result
+
+        except Exception as e:
+            self.logger.warning(f"Failed to parse course name: {course_name}", exception=e)
+
+            # Return fallback result
+            result = ParsedCourseName()
+            result.full_name = course_name
+            result.subject_name = course_name
+            result.folder_name = self._sanitize_folder_name(f"Course_{course_id}")
+            result.folder_path = str(Path(result.folder_name))
+            result.is_parsed_successfully = False
+
+            return result
+
     def _generate_full_name(self, name: str, course_code: str) -> str:
         """
         Generate a full display name for the course.

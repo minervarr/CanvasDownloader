@@ -57,6 +57,15 @@ from ..utils.progress import ProgressTracker, create_progress_tracker
 from ..utils.logger import get_logger
 from ..downloaders.base import ContentDownloaderFactory
 
+# Import all downloader modules to trigger their registration
+from ..downloaders import (
+    assignments,
+    announcements,
+    discussions,
+    files,
+    modules,
+    # Add other downloaders as they become available
+)
 
 @dataclass
 class DownloadResults:
@@ -361,8 +370,8 @@ class CanvasOrchestrator:
 
             # Sort courses by semester and name
             parsed_courses.sort(key=lambda x: (
-                x.get('parsed', {}).get('year', '9999') if x.get('parsed') else '9999',
-                x.get('parsed', {}).get('semester', '9') if x.get('parsed') else '9',
+                x.get('parsed').year if x.get('parsed') and x.get('parsed').is_parsed_successfully else '9999',
+                x.get('parsed').semester if x.get('parsed') and x.get('parsed').is_parsed_successfully else '9',
                 x['name']
             ))
 
@@ -557,9 +566,10 @@ class CanvasOrchestrator:
 
             self.progress_tracker.start_course(
                 course_info['name'],
-                course_id,
-                len(enabled_types)
+                course_id
             )
+            # Set total content types separately
+            self.progress_tracker.set_total_content_types(len(enabled_types))
 
             # Initialize course results
             course_results = {

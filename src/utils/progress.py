@@ -276,6 +276,43 @@ class ProgressTracker:
         else:
             self.logger.warning(f"Unknown callback event: {event}")
 
+    def add_progress_callback(self, callback: Callable) -> None:
+        """
+        Add a progress callback function for orchestrator compatibility.
+
+        This method provides compatibility with the orchestrator's expected interface
+        by registering the callback for multiple progress events.
+
+        Args:
+            callback: Function to call with progress updates
+        """
+        if callback:
+            # Register the callback for multiple relevant events
+            for event in ['course_started', 'course_completed', 'item_updated', 'progress_updated']:
+                if event in self.callbacks:
+                    if callback not in self.callbacks[event]:
+                        self.callbacks[event].append(callback)
+
+            self.logger.debug("Added progress callback for orchestrator")
+
+    def remove_progress_callback(self, callback: Callable) -> None:
+        """
+        Remove a progress callback function for orchestrator compatibility.
+
+        This method provides compatibility with the orchestrator's expected interface
+        by removing the callback from all registered events.
+
+        Args:
+            callback: Function to remove from callbacks
+        """
+        if callback:
+            # Remove the callback from all events
+            for event_callbacks in self.callbacks.values():
+                if callback in event_callbacks:
+                    event_callbacks.remove(callback)
+
+            self.logger.debug("Removed progress callback for orchestrator")
+
     def _trigger_callbacks(self, event: str, *args, **kwargs) -> None:
         """Trigger all callbacks for a specific event."""
         for callback in self.callbacks.get(event, []):
@@ -769,6 +806,30 @@ class ProgressTracker:
             }
 
             self.logger.info("Progress tracker reset")
+
+    def update_application_progress(self) -> None:
+        """
+        Update application-level progress for orchestrator compatibility.
+
+        This method provides compatibility with the orchestrator's expected interface
+        by updating the overall application progress based on completed courses.
+        """
+        with self._lock:
+            if self.application_state.total > 0:
+                # Calculate progress based on completed courses
+                completed_courses = len([
+                    state for state in self.course_states.values()
+                    if state.status == "completed"
+                ])
+                self.application_state.update_progress(current=completed_courses)
+
+                # Update rich progress if available
+                if self.use_rich and self.progress and self.main_task is not None:
+                    self.progress.update(self.main_task, completed=completed_courses)
+
+                self._trigger_callbacks('progress_updated', self.application_state)
+
+            self.logger.debug("Updated application progress")
 
     def __enter__(self):
         """Context manager entry."""

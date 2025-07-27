@@ -1037,3 +1037,7 @@ class AssignmentsDownloader(BaseDownloader):
 
         except Exception as e:
             self.logger.warning(f"Could not create rubric summary", exception=e)
+
+# Register the downloader with the factory
+from .base import ContentDownloaderFactory
+ContentDownloaderFactory.register_downloader('assignments', AssignmentsDownloader)

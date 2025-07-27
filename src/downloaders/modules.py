@@ -430,7 +430,7 @@ class ModulesDownloader(BaseDownloader):
             module_name = self.sanitize_filename(module.name)
 
             # Create module-specific folder
-            module_folder = self.content_folder / f"module_{index:03d}_{module_name}"
+            module_folder = self.course_folder / f"module_{index:03d}_{module_name}"
             module_folder.mkdir(exist_ok=True)
 
             # Save module overview
@@ -1051,7 +1051,7 @@ Downloaded on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         """Create course-wide module index."""
         try:
             index_filename = "course_modules_index.html"
-            index_path = self.content_folder / index_filename
+            index_path = self.course_folder / index_filename
 
             index_html = self._create_course_index_html(modules_metadata)
 
@@ -1174,6 +1174,48 @@ Downloaded on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                 return str(date_obj)
         except:
             return ""
+
+    async def process_content_item(self, item: Any, course_folder: Path,
+                                   metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Process a module item for download.
+
+        This method handles processing of individual module items.
+        Since modules are organizational structures, this processes
+        the module metadata and structure.
+
+        Args:
+            item: Canvas module object
+            course_folder: Base folder path for the course
+            metadata: Pre-extracted module metadata
+
+        Returns:
+            Optional[Dict[str, Any]]: Download result information
+        """
+        try:
+            module_name = self._sanitize_filename(item.name)
+            module_folder = self.course_folder / module_name
+            module_folder.mkdir(parents=True, exist_ok=True)
+
+            # Save module metadata
+            metadata_file = module_folder / 'module_info.json'
+
+            async with aiofiles.open(metadata_file, 'w', encoding='utf-8') as f:
+                await f.write(json.dumps(metadata, indent=2, ensure_ascii=False, default=str))
+
+            return {
+                'module_id': item.id,
+                'module_name': item.name,
+                'folder_path': str(module_folder),
+                'files_created': ['module_info.json'],
+                'success': True
+            }
+
+        except Exception as e:
+            self.logger.error(f"Failed to process module",
+                              module_id=getattr(item, 'id', 'unknown'),
+                              exception=e)
+            return None
 
 
 # Register the downloader with the factory
