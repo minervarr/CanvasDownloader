@@ -226,26 +226,9 @@ class CanvasOrchestrator:
 
     def _initialize_default_content_types(self):
         """Initialize with default enabled content types from config."""
-        content_types_config = self.config.content_types
-
-        if content_types_config.announcements:
-            self.enabled_content_types.add('announcements')
-        if content_types_config.assignments:
-            self.enabled_content_types.add('assignments')
-        if content_types_config.discussions:
-            self.enabled_content_types.add('discussions')
-        if content_types_config.files:
-            self.enabled_content_types.add('files')
-        if content_types_config.modules:
-            self.enabled_content_types.add('modules')
-        if content_types_config.quizzes:
-            self.enabled_content_types.add('quizzes')
-        if content_types_config.grades:
-            self.enabled_content_types.add('grades')
-        if content_types_config.people:
-            self.enabled_content_types.add('people')
-        if content_types_config.chat:
-            self.enabled_content_types.add('chat')
+        # ✅ One line that handles everything safely
+        for content_type, priority in self.config.get_enabled_content_types():
+            self.enabled_content_types.add(content_type)
 
     async def initialize_session(self, session_name: str) -> bool:
         """
