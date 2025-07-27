@@ -781,3 +781,16 @@ class ProgressTracker:
 
         # Display final summary
         self.display_summary()
+
+
+def create_progress_tracker(**kwargs) -> ProgressTracker:
+    """
+    Factory function to create a ProgressTracker instance.
+
+    Args:
+        **kwargs: Arguments to pass to ProgressTracker constructor
+
+    Returns:
+        ProgressTracker: Configured progress tracker instance
+    """
+    return ProgressTracker(**kwargs)

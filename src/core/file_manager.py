@@ -937,14 +937,15 @@ class FileManager:
         self.logger.info("File manager cleaned up")
 
 
-def create_file_manager(**kwargs) -> FileManager:
+def create_file_manager(config=None, **kwargs) -> FileManager:
     """
     Factory function to create a file manager instance.
 
     Args:
-        **kwargs: Arguments to pass to FileManager constructor
+        config: Optional configuration object
+        **kwargs: Additional arguments to pass to FileManager constructor
 
     Returns:
         FileManager: Configured file manager instance
     """
-    return FileManager(**kwargs)
+    return FileManager(config=config, **kwargs)
