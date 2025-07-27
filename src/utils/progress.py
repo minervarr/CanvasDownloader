@@ -831,6 +831,12 @@ class ProgressTracker:
 
             self.logger.debug("Updated application progress")
 
+    def update_current_item(self, item_name: str) -> None:
+        if not hasattr(self, '_current_item_index'):
+            self._current_item_index = 0
+        self._current_item_index += 1
+        self.update_item_progress(self._current_item_index, item_name)
+
     def __enter__(self):
         """Context manager entry."""
         return self

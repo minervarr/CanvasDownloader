@@ -56,6 +56,7 @@ from ..core.file_manager import FileManager, create_file_manager
 from ..utils.progress import ProgressTracker, create_progress_tracker
 from ..utils.logger import get_logger
 from ..downloaders.base import ContentDownloaderFactory
+from ..utils.json_utils import DateTimeJSONEncoder
 
 # Import all downloader modules to trigger their registration
 from ..downloaders import (
@@ -695,7 +696,7 @@ class CanvasOrchestrator:
             summary_path = self.file_manager.base_download_path / 'download_summary.json'
 
             async with aiofiles.open(summary_path, 'w', encoding='utf-8') as f:
-                await f.write(json.dumps(summary, indent=2, ensure_ascii=False))
+                await f.write(json.dumps(summary, indent=2, ensure_ascii=False, cls=DateTimeJSONEncoder))
 
             self.current_results.metadata_files.append(str(summary_path))
 

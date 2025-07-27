@@ -517,7 +517,7 @@ class BaseDownloader(ABC, ConfigurationAccessMixin):
                     # Update progress
                     if self.progress_tracker:
                         item_name = metadata.get('title', f'Item {index}')
-                        self.progress_tracker.update_current_item(item_name)
+                        self.progress_tracker.update_item_progress(index, item_name)
 
                     # Process the item
                     download_info = await self.process_content_item(item, course_folder, metadata)
