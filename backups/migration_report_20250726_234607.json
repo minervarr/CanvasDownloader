@@ -1,0 +1,87 @@
+{
+  "timestamp": "2025-07-26T23:46:07.416802",
+  "dry_run": false,
+  "files_checked": 43,
+  "files_modified": 2,
+  "config_files_migrated": 1,
+  "python_files_updated": 2,
+  "issues_found": [
+    {
+      "file": "/home/nava/PycharmProjects/CanvasDownloader/src/config/settings.py",
+      "line": 36,
+      "pattern": "config.download_settings.max_retries",
+      "issue": "Direct attribute access to config section"
+    },
+    {
+      "file": "/home/nava/PycharmProjects/CanvasDownloader/src/core/orchestrator.py",
+      "line": 273,
+      "pattern": "self.config.download_settings.timeout",
+      "issue": "Direct attribute access to config section"
+    },
+    {
+      "file": "/home/nava/PycharmProjects/CanvasDownloader/src/core/orchestrator.py",
+      "line": 274,
+      "pattern": "self.config.download_settings.retry_attempts",
+      "issue": "Direct attribute access to config section"
+    },
+    {
+      "file": "/home/nava/PycharmProjects/CanvasDownloader/src/core/orchestrator.py",
+      "line": 693,
+      "pattern": "self.config.download_settings.parallel_downloads",
+      "issue": "Direct attribute access to config section"
+    },
+    {
+      "file": "/home/nava/PycharmProjects/CanvasDownloader/src/core/orchestrator.py",
+      "line": 694,
+      "pattern": "self.config.download_settings.skip_existing",
+      "issue": "Direct attribute access to config section"
+    },
+    {
+      "file": "/home/nava/PycharmProjects/CanvasDownloader/src/core/file_manager.py",
+      "line": 368,
+      "pattern": "self.config.download_settings.base_download_path",
+      "issue": "Direct attribute access to config section"
+    },
+    {
+      "file": "/home/nava/PycharmProjects/CanvasDownloader/src/core/file_manager.py",
+      "line": 408,
+      "pattern": "self.config.download_settings.chunk_size",
+      "issue": "Direct attribute access to config section"
+    },
+    {
+      "file": "/home/nava/PycharmProjects/CanvasDownloader/src/core/file_manager.py",
+      "line": 414,
+      "pattern": "self.config.download_settings.verify_downloads",
+      "issue": "Direct attribute access to config section"
+    },
+    {
+      "file": "/home/nava/PycharmProjects/CanvasDownloader/src/core/file_manager.py",
+      "line": 420,
+      "pattern": "self.config.download_settings.max_retries",
+      "issue": "Direct attribute access to config section"
+    },
+    {
+      "file": "/home/nava/PycharmProjects/CanvasDownloader/src/core/file_manager.py",
+      "line": 426,
+      "pattern": "self.config.download_settings.timeout",
+      "issue": "Direct attribute access to config section"
+    },
+    {
+      "file": "/home/nava/PycharmProjects/CanvasDownloader/src/core/file_manager.py",
+      "line": 432,
+      "pattern": "self.config.download_settings.skip_existing",
+      "issue": "Direct attribute access to config section"
+    },
+    {
+      "file": "/home/nava/PycharmProjects/CanvasDownloader/src/downloaders/base.py",
+      "line": 333,
+      "pattern": "self.config.paths.downloads_folder",
+      "issue": "Direct attribute access to config section"
+    }
+  ],
+  "changes_made": [
+    "Added missing fields to /home/nava/PycharmProjects/CanvasDownloader/config/config.json: ['download_settings', 'canvas_api', 'content_types', 'folder_structure', 'paths']"
+  ],
+  "warnings": [],
+  "errors": []
+}
