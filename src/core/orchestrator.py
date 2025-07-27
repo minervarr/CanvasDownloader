@@ -690,8 +690,8 @@ class CanvasOrchestrator:
                 'download_configuration': {
                     'enabled_content_types': list(self.enabled_content_types),
                     'download_options': self.download_options,
-                    'parallel_downloads': self.config.download_settings.parallel_downloads,
-                    'skip_existing': self.config.download_settings.skip_existing
+                    'parallel_downloads': self.config.safe_get('download_settings.parallel_downloads', 4, int),
+                    'skip_existing': self.config.safe_get('download_settings.skip_existing', True, bool)
                 },
                 'results': self.current_results.to_dict(),
                 'generated_at': datetime.now().isoformat(),

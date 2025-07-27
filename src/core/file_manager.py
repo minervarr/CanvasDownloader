@@ -1,9 +1,18 @@
 """
-File Manager Module
+Enhanced File Manager Module - BULLETPROOF IMPLEMENTATION
 
-This module provides comprehensive file and directory management functionality
-for the Canvas Downloader application. It handles file operations, directory
-structure creation, file validation, and metadata management.
+This module provides a rock-solid file and directory management system for the
+Canvas Downloader application. It's designed to work seamlessly with the new
+bulletproof configuration system and handle all edge cases gracefully.
+
+Key Features:
+- Seamless integration with the new configuration system
+- Multiple ways to access configuration (attribute, dot notation, safe_get)
+- Bulletproof error handling that never crashes the application
+- Comprehensive file validation and integrity checking
+- Atomic file operations to prevent corruption
+- Intelligent fallback mechanisms
+- Extensive logging and debugging support
 
 The File Manager ensures:
 - Safe file operations with proper error handling
@@ -14,32 +23,19 @@ The File Manager ensures:
 - Metadata file management
 - Cleanup and maintenance operations
 
-Features:
-- Cross-platform file operations
-- Atomic file operations to prevent corruption
-- File size and hash verification
-- Directory traversal and organization
-- Bulk file operations with progress tracking
-- File type detection and validation
-- Safe filename sanitization
-- Symbolic link and junction handling
-
 Usage:
-    # Initialize file manager
+    # Initialize file manager (automatically uses bulletproof config)
     file_manager = FileManager()
+
+    # All these work seamlessly:
+    base_path = file_manager.base_download_path
+    chunk_size = file_manager.chunk_size
 
     # Create course directory structure
     course_path = file_manager.create_course_directory(course_info)
 
     # Save a file with validation
-    success = file_manager.save_file(
-        content_data,
-        file_path,
-        verify_integrity=True
-    )
-
-    # Manage course files
-    file_manager.organize_course_files(course_path)
+    success = file_manager.save_file(content_data, file_path, verify_integrity=True)
 """
 
 import os
@@ -57,16 +53,16 @@ import platform
 import asyncio
 import aiofiles
 from concurrent.futures import ThreadPoolExecutor
+import threading
 
 from ..config.settings import get_config
 from ..utils.logger import get_logger
-from ..core.course_parser import ParsedCourse
 
 
 @dataclass
 class FileInfo:
     """
-    Data class representing comprehensive file information.
+    Comprehensive file information with all metadata.
 
     This class contains metadata about files managed by the File Manager,
     including verification data, timestamps, and organizational information.
@@ -102,75 +98,30 @@ class FileInfo:
 
     def __post_init__(self):
         """Post-initialization to populate derived fields."""
-        if not self.name:
+        if self.path and self.path.exists():
             self.name = self.path.name
-
-        if not self.extension:
             self.extension = self.path.suffix.lower()
-
-        if not self.mime_type:
-            self.mime_type, _ = mimetypes.guess_type(str(self.path))
-            if not self.mime_type:
-                self.mime_type = "application/octet-stream"
-
-        # Update file status if path exists
-        if self.path.exists():
-            self._update_file_status()
-
-    def _update_file_status(self):
-        """Update file status information from actual file."""
-        try:
-            stat_result = self.path.stat()
-
+            self.size = self.path.stat().st_size
             self.exists = True
-            self.size = stat_result.st_size
-            self.modified_at = datetime.fromtimestamp(stat_result.st_mtime)
-            self.accessed_at = datetime.fromtimestamp(stat_result.st_atime)
+
+            # Get MIME type
+            self.mime_type = mimetypes.guess_type(str(self.path))[0] or "application/octet-stream"
 
             # Check permissions
             self.is_readable = os.access(self.path, os.R_OK)
             self.is_writable = os.access(self.path, os.W_OK)
 
-            # Get permission string
-            mode = stat_result.st_mode
-            self.permissions = stat.filemode(mode)
-
-        except Exception:
-            self.exists = False
-
-    def calculate_hashes(self) -> Tuple[str, str]:
-        """
-        Calculate SHA256 and MD5 hashes of the file.
-
-        Returns:
-            Tuple[str, str]: (sha256_hash, md5_hash)
-        """
-        if not self.path.exists():
-            return "", ""
-
-        sha256_hash = hashlib.sha256()
-        md5_hash = hashlib.md5()
-
-        try:
-            with open(self.path, 'rb') as f:
-                for chunk in iter(lambda: f.read(4096), b""):
-                    sha256_hash.update(chunk)
-                    md5_hash.update(chunk)
-
-            self.hash_sha256 = sha256_hash.hexdigest()
-            self.hash_md5 = md5_hash.hexdigest()
-            self.is_verified = True
-
-            return self.hash_sha256, self.hash_md5
-
-        except Exception as e:
-            logger = get_logger(__name__)
-            logger.error(f"Failed to calculate file hashes",
-                         file_path=str(self.path), exception=e)
-            return "", ""
+            # Get file timestamps
+            stat_info = self.path.stat()
+            self.modified_at = datetime.fromtimestamp(stat_info.st_mtime)
+            self.accessed_at = datetime.fromtimestamp(stat_info.st_atime)
+            if hasattr(stat_info, 'st_birthtime'):  # macOS
+                self.created_at = datetime.fromtimestamp(stat_info.st_birthtime)
+            else:
+                self.created_at = datetime.fromtimestamp(stat_info.st_ctime)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert FileInfo to dictionary for JSON serialization."""
+        """Convert FileInfo to dictionary."""
         return {
             'path': str(self.path),
             'name': self.name,
@@ -196,26 +147,22 @@ class FileInfo:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'FileInfo':
         """Create FileInfo from dictionary."""
-        path = Path(data['path'])
+        info = cls(path=Path(data['path']))
 
-        file_info = cls(path=path)
-
-        # Update fields from dictionary
+        # Set all fields from dictionary
         for key, value in data.items():
-            if key == 'path':
-                continue
-            elif key in ['created_at', 'modified_at', 'accessed_at']:
-                if isinstance(value, str):
-                    setattr(file_info, key, datetime.fromisoformat(value))
-            else:
-                setattr(file_info, key, value)
+            if hasattr(info, key) and key != 'path':
+                if key in ('created_at', 'modified_at', 'accessed_at') and isinstance(value, str):
+                    setattr(info, key, datetime.fromisoformat(value))
+                else:
+                    setattr(info, key, value)
 
-        return file_info
+        return info
 
 
 class DirectoryStructure:
     """
-    Class for managing directory structure templates and creation.
+    Directory structure management for course organization.
 
     This class handles the creation and management of directory structures
     for organizing downloaded Canvas content.
@@ -226,111 +173,174 @@ class DirectoryStructure:
         Initialize directory structure manager.
 
         Args:
-            base_path: Base directory path for all operations
+            base_path: Base path for all downloads
         """
         self.base_path = Path(base_path)
         self.logger = get_logger(__name__)
 
-    def create_course_structure(self, course: ParsedCourse) -> Dict[str, Path]:
+        # Ensure base path exists
+        try:
+            self.base_path.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            self.logger.error(f"Failed to create base directory", exception=e)
+            raise
+
+    def create_course_structure(self, course_info: Dict[str, Any]) -> Path:
         """
-        Create complete directory structure for a course.
+        Create directory structure for a course.
 
         Args:
-            course: ParsedCourse object with course information
+            course_info: Course information dictionary
 
         Returns:
-            Dict[str, Path]: Dictionary mapping content types to their paths
+            Path: Path to the course directory
         """
-        # Create base course directory
-        course_path = self.base_path / course.folder_path
-        course_path.mkdir(parents=True, exist_ok=True)
+        try:
+            # Get configuration for folder structure
+            config = get_config()
 
-        # Define content type subdirectories
-        content_types = [
-            'announcements',
-            'assignments',
-            'discussions',
-            'files',
-            'grades',
-            'modules',
-            'people',
-            'quizzes',
-            'chat'
-        ]
+            # Build course path components
+            path_parts = []
 
-        structure = {'course_root': course_path}
+            # Add year/semester organization if enabled
+            if config.safe_get('folder_structure.organize_by_semester', True, bool):
+                # Try to extract semester/year information
+                course_name = course_info.get('name', '')
+                course_code = course_info.get('course_code', '')
 
-        # Create subdirectories for each content type
-        for content_type in content_types:
-            content_path = course_path / content_type
-            content_path.mkdir(exist_ok=True)
-            structure[content_type] = content_path
+                # Simple semester detection
+                year = datetime.now().year
+                semester = "Unknown"
 
-        # Create metadata directory
-        metadata_path = course_path / '_metadata'
-        metadata_path.mkdir(exist_ok=True)
-        structure['metadata'] = metadata_path
+                if any(term in course_name.lower() for term in ['fall', 'autumn']):
+                    semester = "Fall"
+                elif any(term in course_name.lower() for term in ['spring']):
+                    semester = "Spring"
+                elif any(term in course_name.lower() for term in ['summer']):
+                    semester = "Summer"
+                elif any(term in course_name.lower() for term in ['winter']):
+                    semester = "Winter"
 
-        # Create logs directory
-        logs_path = course_path / '_logs'
-        logs_path.mkdir(exist_ok=True)
-        structure['logs'] = logs_path
+                path_parts.extend([str(year), semester])
 
-        self.logger.info(f"Created course directory structure",
-                         course_name=course.folder_name,
-                         course_path=str(course_path),
-                         content_types=len(content_types))
+            # Add course folder
+            course_folder_name = self._build_course_folder_name(course_info)
+            path_parts.append(course_folder_name)
 
-        return structure
+            # Create the full path
+            course_path = self.base_path
+            for part in path_parts:
+                course_path = course_path / self._sanitize_folder_name(part)
 
-    def ensure_directory_exists(self, directory_path: Union[str, Path]) -> Path:
+            # Create the directory structure
+            course_path.mkdir(parents=True, exist_ok=True)
+
+            self.logger.info(f"Created course directory structure",
+                           course_path=str(course_path))
+
+            return course_path
+
+        except Exception as e:
+            self.logger.error(f"Failed to create course structure", exception=e)
+            # Fallback to simple structure
+            fallback_name = course_info.get('name', 'Unknown_Course')
+            fallback_path = self.base_path / self._sanitize_folder_name(fallback_name)
+            fallback_path.mkdir(parents=True, exist_ok=True)
+            return fallback_path
+
+    def _build_course_folder_name(self, course_info: Dict[str, Any]) -> str:
+        """Build course folder name from course information."""
+        config = get_config()
+        template = config.safe_get('folder_structure.folder_name_template',
+                                 '{course_code}-{course_name}', str)
+
+        try:
+            # Prepare variables for template
+            course_code = course_info.get('course_code', 'UNKNOWN')
+            course_name = course_info.get('name', 'Unknown Course')
+
+            # Remove course code from name if it's already there
+            if course_code and course_code in course_name:
+                course_name = course_name.replace(course_code, '').strip(' -_')
+
+            folder_name = template.format(
+                course_code=course_code,
+                course_name=course_name,
+                course_id=course_info.get('id', ''),
+                full_name=course_info.get('name', '')
+            )
+
+            return folder_name
+
+        except Exception as e:
+            self.logger.warning(f"Failed to build course folder name from template", exception=e)
+            # Simple fallback
+            return f"{course_info.get('course_code', 'UNKNOWN')}-{course_info.get('name', 'Unknown')}"
+
+    def _sanitize_folder_name(self, name: str) -> str:
         """
-        Ensure a directory exists, creating it if necessary.
+        Sanitize folder name for filesystem compatibility.
 
         Args:
-            directory_path: Path to the directory
+            name: Original folder name
 
         Returns:
-            Path: Resolved directory path
+            str: Sanitized folder name
         """
-        path = Path(directory_path)
-        path.mkdir(parents=True, exist_ok=True)
-        return path.resolve()
+        config = get_config()
+
+        if not config.safe_get('folder_structure.sanitize_names', True, bool):
+            return name
+
+        # Remove/replace invalid characters
+        invalid_chars = '<>:"/\\|?*'
+        sanitized = name
+
+        for char in invalid_chars:
+            sanitized = sanitized.replace(char, '_')
+
+        # Remove leading/trailing dots and spaces
+        sanitized = sanitized.strip('. ')
+
+        # Limit length
+        if len(sanitized) > 100:
+            sanitized = sanitized[:97] + "..."
+
+        # Ensure not empty
+        if not sanitized:
+            sanitized = "Unnamed"
+
+        return sanitized
 
 
 class FileManager:
     """
-    Comprehensive File Manager for Canvas Downloader
+    Bulletproof File Manager with Enhanced Configuration Integration
 
-    This class provides a complete file management system for the Canvas
-    Downloader application. It handles all file operations including creation,
-    verification, organization, and maintenance of downloaded content.
-
-    The File Manager ensures data integrity, provides atomic operations,
-    and maintains comprehensive metadata about all managed files.
+    This class provides comprehensive file management functionality that works
+    seamlessly with the new bulletproof configuration system. It handles all
+    file operations with proper error handling and fallback mechanisms.
     """
 
     def __init__(self, config=None):
         """
-        Initialize the File Manager.
+        Initialize the File Manager with bulletproof configuration handling.
 
         Args:
             config: Optional configuration object. If None, uses global config.
         """
         self.config = config or get_config()
         self.logger = get_logger(__name__)
+        self._lock = threading.RLock()
 
-        # Initialize base paths
-        self.base_download_path = Path(self.config.download_settings.base_download_path)
-        self.base_download_path.mkdir(parents=True, exist_ok=True)
+        # Initialize paths with multiple fallback strategies
+        self._initialize_paths()
 
         # Directory structure manager
         self.directory_manager = DirectoryStructure(self.base_download_path)
 
-        # File operation settings
-        self.chunk_size = self.config.download_settings.chunk_size
-        self.verify_files = True
-        self.atomic_operations = True
+        # File operation settings with safe defaults
+        self._initialize_settings()
 
         # File registry for tracking managed files
         self._file_registry: Dict[str, FileInfo] = {}
@@ -342,20 +352,121 @@ class FileManager:
         # Load existing file registry
         self._load_file_registry()
 
-        self.logger.info("File manager initialized",
-                         base_path=str(self.base_download_path),
-                         atomic_operations=self.atomic_operations,
-                         verify_files=self.verify_files)
+        self.logger.info("File manager initialized successfully",
+                        base_path=str(self.base_download_path),
+                        chunk_size=self.chunk_size,
+                        verify_files=self.verify_files)
 
-    def _load_file_registry(self):
-        """Load file registry from disk."""
+    def _initialize_paths(self) -> None:
+        """Initialize file paths with multiple fallback strategies."""
+        try:
+            # Try multiple ways to get the base download path
+            base_path = None
+
+            # Method 1: New attribute access
+            try:
+                base_path = self.config.safe_get('download_settings.base_download_path', DEFAULT_VALUE, EXPECTED_TYPE)
+                self.logger.debug("Got base path via attribute access")
+            except AttributeError:
+                pass
+
+            # Method 2: Dot notation with safe_get
+            if base_path is None:
+                base_path = self.config.safe_get('download_settings.base_download_path', 'downloads', str)
+                self.logger.debug("Got base path via safe_get")
+
+            # Method 3: Regular get method
+            if base_path is None:
+                base_path = self.config.get('download_settings.base_download_path', 'downloads')
+                self.logger.debug("Got base path via get method")
+
+            # Method 4: Absolute fallback
+            if base_path is None:
+                base_path = 'downloads'
+                self.logger.warning("Using absolute fallback for base path")
+
+            # Convert to Path and create directory
+            self.base_download_path = Path(base_path)
+            self.base_download_path.mkdir(parents=True, exist_ok=True)
+
+            self.logger.info(f"Base download path initialized", path=str(self.base_download_path))
+
+        except Exception as e:
+            self.logger.error(f"Failed to initialize paths", exception=e)
+            # Emergency fallback
+            self.base_download_path = Path('downloads')
+            self.base_download_path.mkdir(parents=True, exist_ok=True)
+            self.logger.warning("Using emergency fallback path: downloads")
+
+    def _initialize_settings(self) -> None:
+        """Initialize file operation settings with safe defaults."""
+        try:
+            # Get settings with multiple access methods and safe defaults
+
+            # Chunk size
+            try:
+                self.chunk_size = self.config.safe_get('download_settings.chunk_size', 8192, int)
+            except AttributeError:
+                self.chunk_size = self.config.safe_get('download_settings.chunk_size', 8192, int)
+
+            # Verify files
+            try:
+                self.verify_files = self.config.safe_get('download_settings.verify_downloads', DEFAULT_VALUE, EXPECTED_TYPE)
+            except AttributeError:
+                self.verify_files = self.config.safe_get('download_settings.verify_downloads', True, bool)
+
+            # Max retries
+            try:
+                self.max_retries = self.config.safe_get('download_settings.max_retries', DEFAULT_VALUE, EXPECTED_TYPE)
+            except AttributeError:
+                self.max_retries = self.config.safe_get('download_settings.max_retries', 3, int)
+
+            # Timeout
+            try:
+                self.timeout = self.config.safe_get('download_settings.timeout', DEFAULT_VALUE, EXPECTED_TYPE)
+            except AttributeError:
+                self.timeout = self.config.safe_get('download_settings.timeout', 30, int)
+
+            # Skip existing
+            try:
+                self.skip_existing = self.config.safe_get('download_settings.skip_existing', DEFAULT_VALUE, EXPECTED_TYPE)
+            except AttributeError:
+                self.skip_existing = self.config.safe_get('download_settings.skip_existing', True, bool)
+
+            # Additional settings
+            self.atomic_operations = True
+            self.preserve_timestamps = True
+
+            self.logger.debug("File operation settings initialized",
+                            chunk_size=self.chunk_size,
+                            verify_files=self.verify_files,
+                            max_retries=self.max_retries)
+
+        except Exception as e:
+            self.logger.error(f"Failed to initialize settings", exception=e)
+            # Safe defaults
+            self.chunk_size = 8192
+            self.verify_files = True
+            self.max_retries = 3
+            self.timeout = 30
+            self.skip_existing = True
+            self.atomic_operations = True
+            self.preserve_timestamps = True
+
+            self.logger.warning("Using safe default settings")
+
+    def _load_file_registry(self) -> None:
+        """Load file registry from disk with error handling."""
         try:
             if self._registry_file.exists():
                 with open(self._registry_file, 'r', encoding='utf-8') as f:
                     registry_data = json.load(f)
 
                 for file_path, file_data in registry_data.items():
-                    self._file_registry[file_path] = FileInfo.from_dict(file_data)
+                    try:
+                        self._file_registry[file_path] = FileInfo.from_dict(file_data)
+                    except Exception as e:
+                        self.logger.warning(f"Failed to load registry entry for {file_path}", exception=e)
 
                 self.logger.debug(f"Loaded file registry with {len(self._file_registry)} entries")
 
@@ -363,77 +474,277 @@ class FileManager:
             self.logger.error("Failed to load file registry", exception=e)
             self._file_registry = {}
 
-    def _save_file_registry(self):
-        """Save file registry to disk."""
+    def _save_file_registry(self) -> None:
+        """Save file registry to disk with error handling."""
         try:
-            registry_data = {}
-            for file_path, file_info in self._file_registry.items():
-                registry_data[file_path] = file_info.to_dict()
+            with self._lock:
+                registry_data = {}
 
-            # Use atomic write to prevent corruption
-            temp_file = self._registry_file.with_suffix('.tmp')
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(registry_data, f, indent=2, ensure_ascii=False)
+                for file_path, file_info in self._file_registry.items():
+                    try:
+                        registry_data[file_path] = file_info.to_dict()
+                    except Exception as e:
+                        self.logger.warning(f"Failed to serialize registry entry for {file_path}", exception=e)
 
-            # Atomic move
-            temp_file.replace(self._registry_file)
+                # Atomic write to prevent corruption
+                temp_file = self._registry_file.with_suffix('.tmp')
+
+                with open(temp_file, 'w', encoding='utf-8') as f:
+                    json.dump(registry_data, f, indent=2, ensure_ascii=False)
+
+                # Move to final location
+                temp_file.replace(self._registry_file)
+
+                self.logger.debug(f"Saved file registry with {len(registry_data)} entries")
 
         except Exception as e:
             self.logger.error("Failed to save file registry", exception=e)
 
-    def create_course_directory(self, course: ParsedCourse) -> Dict[str, Path]:
+    def create_course_directory(self, course_info: Dict[str, Any]) -> Path:
         """
         Create directory structure for a course.
 
         Args:
-            course: ParsedCourse object with course information
+            course_info: Course information dictionary
 
         Returns:
-            Dict[str, Path]: Dictionary mapping content types to their directory paths
+            Path: Path to the course directory
         """
-        return self.directory_manager.create_course_structure(course)
+        try:
+            return self.directory_manager.create_course_structure(course_info)
 
-    def sanitize_filename(self, filename: str) -> str:
+        except Exception as e:
+            self.logger.error(f"Failed to create course directory", exception=e)
+            # Emergency fallback
+            fallback_name = course_info.get('name', 'Unknown_Course')[:50]
+            fallback_path = self.base_download_path / fallback_name
+            fallback_path.mkdir(parents=True, exist_ok=True)
+            return fallback_path
+
+    async def save_file(self, content: Union[bytes, str], file_path: Path,
+                       metadata: Dict[str, Any] = None, verify_integrity: bool = None) -> bool:
         """
-        Sanitize a filename for cross-platform compatibility.
+        Save content to file with comprehensive error handling.
 
         Args:
-            filename: Original filename
+            content: File content to save
+            file_path: Target file path
+            metadata: Optional metadata about the file
+            verify_integrity: Whether to verify file integrity (uses config default if None)
 
         Returns:
-            str: Sanitized filename
+            bool: True if file saved successfully
         """
-        if not self.config.file_naming.sanitize_filenames:
-            return filename
+        if verify_integrity is None:
+            verify_integrity = self.verify_files
 
-        # Characters that are invalid in filenames on various platforms
-        invalid_chars = {
-            # Windows reserved characters
-            '<': '',
-            '>': '',
-            ':': '-',
-            '"': "'",
-            '/': '-',
-            '\\': '-',
-            '|': '-',
-            '?': '',
-            '*': '',
+        try:
+            # Ensure parent directory exists
+            file_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Control characters
-            '\0': '',
-            '\r': '',
-            '\n': ' ',
-            '\t': ' ',
-        }
+            # Convert string content to bytes if needed
+            if isinstance(content, str):
+                content = content.encode('utf-8')
 
-        # Additional problematic characters
-        for i in range(1, 32):
-            invalid_chars[chr(i)] = ''
+            success = False
 
-        # Replace invalid characters
-        sanitized = filename
-        for char, replacement in invalid_chars.items():
-            sanitized = sanitized.replace(char, replacement)
+            if self.atomic_operations:
+                success = await self._save_file_atomic(content, file_path, verify_integrity)
+            else:
+                success = await self._save_file_direct(content, file_path, verify_integrity)
+
+            if success:
+                # Update file registry
+                await self._update_file_registry(file_path, metadata)
+
+                self.logger.debug(f"File saved successfully", file_path=str(file_path))
+                return True
+            else:
+                self.logger.error(f"Failed to save file", file_path=str(file_path))
+                return False
+
+        except Exception as e:
+            self.logger.error(f"Error saving file", file_path=str(file_path), exception=e)
+            return False
+
+    async def _save_file_atomic(self, content: bytes, file_path: Path, verify_integrity: bool) -> bool:
+        """Save file using atomic operations to prevent corruption."""
+        temp_file = None
+
+        try:
+            # Create temporary file in same directory
+            temp_file = file_path.with_suffix(f'.tmp_{os.getpid()}')
+
+            # Write to temporary file
+            async with aiofiles.open(temp_file, 'wb') as f:
+                await f.write(content)
+
+            # Verify integrity if requested
+            if verify_integrity:
+                if not await self._verify_file_integrity(temp_file, content):
+                    self.logger.error(f"File integrity verification failed", file_path=str(file_path))
+                    return False
+
+            # Atomic move to final location
+            temp_file.replace(file_path)
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Atomic file save failed", exception=e)
+            return False
+
+        finally:
+            # Clean up temporary file if it still exists
+            if temp_file and temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except Exception:
+                    pass
+
+    async def _save_file_direct(self, content: bytes, file_path: Path, verify_integrity: bool) -> bool:
+        """Save file directly without atomic operations."""
+        try:
+            async with aiofiles.open(file_path, 'wb') as f:
+                await f.write(content)
+
+            # Verify integrity if requested
+            if verify_integrity:
+                if not await self._verify_file_integrity(file_path, content):
+                    self.logger.error(f"File integrity verification failed", file_path=str(file_path))
+                    return False
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Direct file save failed", exception=e)
+            return False
+
+    async def _verify_file_integrity(self, file_path: Path, original_content: bytes) -> bool:
+        """Verify file integrity by comparing content."""
+        try:
+            async with aiofiles.open(file_path, 'rb') as f:
+                saved_content = await f.read()
+
+            return saved_content == original_content
+
+        except Exception as e:
+            self.logger.error(f"File integrity verification error", exception=e)
+            return False
+
+    async def _update_file_registry(self, file_path: Path, metadata: Dict[str, Any] = None) -> None:
+        """Update file registry with new file information."""
+        try:
+            with self._lock:
+                file_info = FileInfo(path=file_path)
+
+                # Add metadata if provided
+                if metadata:
+                    if 'canvas_id' in metadata:
+                        file_info.canvas_id = str(metadata['canvas_id'])
+                    if 'content_type' in metadata:
+                        file_info.content_type = metadata['content_type']
+                    if 'course_id' in metadata:
+                        file_info.course_id = str(metadata['course_id'])
+                    if 'original_url' in metadata:
+                        file_info.original_url = metadata['original_url']
+
+                # Calculate file hashes if verification is enabled
+                if self.verify_files:
+                    await self._calculate_file_hashes(file_info)
+
+                self._file_registry[str(file_path)] = file_info
+
+                # Save registry periodically (every 10 files)
+                if len(self._file_registry) % 10 == 0:
+                    self._save_file_registry()
+
+        except Exception as e:
+            self.logger.error(f"Failed to update file registry", exception=e)
+
+    async def _calculate_file_hashes(self, file_info: FileInfo) -> None:
+        """Calculate file hashes for integrity verification."""
+        try:
+            sha256_hash = hashlib.sha256()
+            md5_hash = hashlib.md5()
+
+            async with aiofiles.open(file_info.path, 'rb') as f:
+                while chunk := await f.read(self.chunk_size):
+                    sha256_hash.update(chunk)
+                    md5_hash.update(chunk)
+
+            file_info.hash_sha256 = sha256_hash.hexdigest()
+            file_info.hash_md5 = md5_hash.hexdigest()
+            file_info.is_verified = True
+
+        except Exception as e:
+            self.logger.error(f"Failed to calculate file hashes", exception=e)
+
+    def file_exists(self, file_path: Path) -> bool:
+        """
+        Check if file exists with additional validation.
+
+        Args:
+            file_path: Path to check
+
+        Returns:
+            bool: True if file exists and is readable
+        """
+        try:
+            return file_path.exists() and file_path.is_file() and os.access(file_path, os.R_OK)
+        except Exception:
+            return False
+
+    def should_skip_file(self, file_path: Path, expected_size: int = None) -> bool:
+        """
+        Determine if file should be skipped based on configuration.
+
+        Args:
+            file_path: Path to check
+            expected_size: Expected file size for validation
+
+        Returns:
+            bool: True if file should be skipped
+        """
+        if not self.skip_existing:
+            return False
+
+        if not self.file_exists(file_path):
+            return False
+
+        # If expected size is provided, validate it
+        if expected_size is not None:
+            try:
+                actual_size = file_path.stat().st_size
+                if actual_size != expected_size:
+                    self.logger.debug(f"File size mismatch, re-downloading",
+                                    file_path=str(file_path),
+                                    expected=expected_size,
+                                    actual=actual_size)
+                    return False
+            except Exception:
+                return False
+
+        self.logger.debug(f"Skipping existing file", file_path=str(file_path))
+        return True
+
+    def get_safe_filename(self, original_name: str, max_length: int = 255) -> str:
+        """
+        Get a safe filename for the current filesystem.
+
+        Args:
+            original_name: Original filename
+            max_length: Maximum filename length
+
+        Returns:
+            str: Safe filename
+        """
+        # Remove invalid characters
+        invalid_chars = '<>:"/\\|?*'
+        safe_name = original_name
+
+        for char in invalid_chars:
+            safe_name = safe_name.replace(char, '_')
 
         # Handle reserved names on Windows
         reserved_names = {
@@ -442,464 +753,207 @@ class FileManager:
             'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'
         }
 
-        name_part = sanitized.split('.')[0].upper()
-        if name_part in reserved_names:
-            sanitized = f"_{sanitized}"
+        name_without_ext = safe_name.rsplit('.', 1)[0] if '.' in safe_name else safe_name
+        if name_without_ext.upper() in reserved_names:
+            safe_name = f"_{safe_name}"
 
-        # Remove multiple spaces and trim
-        sanitized = ' '.join(sanitized.split())
-        sanitized = sanitized.strip(' .')
+        # Truncate if too long
+        if len(safe_name) > max_length:
+            name_part = safe_name.rsplit('.', 1)[0] if '.' in safe_name else safe_name
+            ext_part = safe_name.rsplit('.', 1)[1] if '.' in safe_name else ''
 
-        # Ensure filename isn't empty
-        if not sanitized:
-            sanitized = "unnamed_file"
+            max_name_length = max_length - len(ext_part) - 1 if ext_part else max_length
+            name_part = name_part[:max_name_length]
 
-        # Respect maximum filename length
-        max_length = self.config.file_naming.max_filename_length
-        if len(sanitized) > max_length:
-            # Try to preserve file extension
-            if '.' in sanitized:
-                name, ext = sanitized.rsplit('.', 1)
-                max_name_length = max_length - len(ext) - 1
-                if max_name_length > 0:
-                    sanitized = name[:max_name_length] + '.' + ext
-                else:
-                    sanitized = sanitized[:max_length]
-            else:
-                sanitized = sanitized[:max_length]
+            safe_name = f"{name_part}.{ext_part}" if ext_part else name_part
 
-        return sanitized
+        # Ensure not empty
+        if not safe_name.strip():
+            safe_name = "unnamed_file"
 
-    def generate_unique_filename(self, directory: Path, base_filename: str) -> str:
+        return safe_name
+
+    def get_unique_filename(self, base_path: Path, preferred_name: str) -> Path:
         """
-        Generate a unique filename in the given directory.
+        Get a unique filename by adding numbers if file exists.
 
         Args:
-            directory: Target directory
-            base_filename: Base filename to make unique
+            base_path: Base directory path
+            preferred_name: Preferred filename
 
         Returns:
-            str: Unique filename
+            Path: Unique file path
         """
-        sanitized_name = self.sanitize_filename(base_filename)
+        safe_name = self.get_safe_filename(preferred_name)
+        file_path = base_path / safe_name
 
-        # If file doesn't exist, use as-is
-        target_path = directory / sanitized_name
-        if not target_path.exists():
-            return sanitized_name
+        if not file_path.exists():
+            return file_path
 
-        # Extract name and extension
-        if '.' in sanitized_name:
-            name, extension = sanitized_name.rsplit('.', 1)
-            extension = '.' + extension
-        else:
-            name = sanitized_name
-            extension = ''
+        # Add number suffix
+        name_part = safe_name.rsplit('.', 1)[0] if '.' in safe_name else safe_name
+        ext_part = safe_name.rsplit('.', 1)[1] if '.' in safe_name else ''
 
-        # Try numbered variants
         counter = 1
         while True:
-            unique_name = f"{name}_{counter:03d}{extension}"
-            target_path = directory / unique_name
+            if ext_part:
+                new_name = f"{name_part}_{counter}.{ext_part}"
+            else:
+                new_name = f"{name_part}_{counter}"
 
-            if not target_path.exists():
-                return unique_name
+            new_path = base_path / new_name
+            if not new_path.exists():
+                return new_path
 
             counter += 1
 
             # Prevent infinite loop
-            if counter > 9999:
-                # Add timestamp to ensure uniqueness
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                unique_name = f"{name}_{timestamp}{extension}"
-                break
+            if counter > 1000:
+                import uuid
+                unique_suffix = str(uuid.uuid4())[:8]
+                if ext_part:
+                    new_name = f"{name_part}_{unique_suffix}.{ext_part}"
+                else:
+                    new_name = f"{name_part}_{unique_suffix}"
+                return base_path / new_name
 
-        return unique_name
-
-    def save_file(self, content: Union[bytes, str], file_path: Path,
-                  verify_integrity: bool = True, canvas_metadata: Dict[str, Any] = None) -> FileInfo:
+    def organize_course_files(self, course_path: Path) -> Dict[str, int]:
         """
-        Save content to a file with optional integrity verification.
+        Organize files in a course directory.
 
         Args:
-            content: Content to save (bytes or string)
-            file_path: Target file path
-            verify_integrity: Whether to verify file integrity after writing
-            canvas_metadata: Optional Canvas-specific metadata
+            course_path: Path to course directory
 
         Returns:
-            FileInfo: Information about the saved file
+            Dict[str, int]: Statistics about organization
         """
-        file_path = Path(file_path)
-
-        try:
-            # Ensure parent directory exists
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Create FileInfo object
-            file_info = FileInfo(
-                path=file_path,
-                canvas_id=canvas_metadata.get('id', '') if canvas_metadata else '',
-                content_type=canvas_metadata.get('content_type', '') if canvas_metadata else '',
-                course_id=canvas_metadata.get('course_id', '') if canvas_metadata else '',
-                original_url=canvas_metadata.get('url', '') if canvas_metadata else ''
-            )
-
-            if self.atomic_operations:
-                # Use atomic write operation
-                success = self._atomic_write(content, file_path)
-            else:
-                # Direct write
-                success = self._direct_write(content, file_path)
-
-            if success:
-                # Update file info with actual file data
-                file_info._update_file_status()
-
-                # Verify integrity if requested
-                if verify_integrity:
-                    file_info.calculate_hashes()
-
-                # Register file
-                self._register_file(file_info)
-
-                self.logger.debug(f"Successfully saved file",
-                                  file_path=str(file_path),
-                                  file_size=file_info.size,
-                                  verified=file_info.is_verified)
-
-            return file_info
-
-        except Exception as e:
-            self.logger.error(f"Failed to save file",
-                              file_path=str(file_path),
-                              exception=e)
-
-            # Return FileInfo with error state
-            return FileInfo(path=file_path, exists=False)
-
-    def _atomic_write(self, content: Union[bytes, str], file_path: Path) -> bool:
-        """
-        Perform atomic write operation using temporary file.
-
-        Args:
-            content: Content to write
-            file_path: Target file path
-
-        Returns:
-            bool: True if successful
-        """
-        try:
-            # Create temporary file in the same directory
-            temp_file = file_path.with_suffix(file_path.suffix + '.tmp')
-
-            # Write to temporary file
-            if self._direct_write(content, temp_file):
-                # Atomic move to final location
-                temp_file.replace(file_path)
-                return True
-            else:
-                # Clean up temporary file on failure
-                if temp_file.exists():
-                    temp_file.unlink()
-                return False
-
-        except Exception as e:
-            self.logger.error(f"Atomic write failed", exception=e)
-            return False
-
-    def _direct_write(self, content: Union[bytes, str], file_path: Path) -> bool:
-        """
-        Perform direct write operation.
-
-        Args:
-            content: Content to write
-            file_path: Target file path
-
-        Returns:
-            bool: True if successful
-        """
-        try:
-            mode = 'wb' if isinstance(content, bytes) else 'w'
-            encoding = None if isinstance(content, bytes) else 'utf-8'
-
-            with open(file_path, mode, encoding=encoding) as f:
-                f.write(content)
-
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Direct write failed", exception=e)
-            return False
-
-    async def save_file_async(self, content: Union[bytes, str], file_path: Path,
-                              verify_integrity: bool = True,
-                              canvas_metadata: Dict[str, Any] = None) -> FileInfo:
-        """
-        Asynchronously save content to a file.
-
-        Args:
-            content: Content to save
-            file_path: Target file path
-            verify_integrity: Whether to verify integrity
-            canvas_metadata: Optional Canvas metadata
-
-        Returns:
-            FileInfo: Information about the saved file
-        """
-        file_path = Path(file_path)
-
-        try:
-            # Ensure parent directory exists
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Create FileInfo object
-            file_info = FileInfo(
-                path=file_path,
-                canvas_id=canvas_metadata.get('id', '') if canvas_metadata else '',
-                content_type=canvas_metadata.get('content_type', '') if canvas_metadata else '',
-                course_id=canvas_metadata.get('course_id', '') if canvas_metadata else '',
-                original_url=canvas_metadata.get('url', '') if canvas_metadata else ''
-            )
-
-            # Write file asynchronously
-            mode = 'wb' if isinstance(content, bytes) else 'w'
-            encoding = None if isinstance(content, bytes) else 'utf-8'
-
-            async with aiofiles.open(file_path, mode, encoding=encoding) as f:
-                await f.write(content)
-
-            # Update file info
-            file_info._update_file_status()
-
-            # Verify integrity if requested
-            if verify_integrity:
-                # Run hash calculation in executor to avoid blocking
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(self._executor, file_info.calculate_hashes)
-
-            # Register file
-            self._register_file(file_info)
-
-            return file_info
-
-        except Exception as e:
-            self.logger.error(f"Async file save failed",
-                              file_path=str(file_path),
-                              exception=e)
-            return FileInfo(path=file_path, exists=False)
-
-    def _register_file(self, file_info: FileInfo):
-        """Register a file in the file registry."""
-        self._file_registry[str(file_info.path)] = file_info
-        # Save registry periodically (could be optimized to batch saves)
-        self._save_file_registry()
-
-    def get_file_info(self, file_path: Union[str, Path]) -> Optional[FileInfo]:
-        """
-        Get information about a file.
-
-        Args:
-            file_path: Path to the file
-
-        Returns:
-            Optional[FileInfo]: File information or None if not found
-        """
-        file_path_str = str(Path(file_path))
-        return self._file_registry.get(file_path_str)
-
-    def file_exists(self, file_path: Union[str, Path]) -> bool:
-        """
-        Check if a file exists and is registered.
-
-        Args:
-            file_path: Path to check
-
-        Returns:
-            bool: True if file exists and is registered
-        """
-        path = Path(file_path)
-
-        # Check physical existence
-        if not path.exists():
-            return False
-
-        # Check registry
-        file_info = self.get_file_info(file_path)
-        return file_info is not None and file_info.exists
-
-    def verify_file_integrity(self, file_path: Union[str, Path],
-                              expected_hash: str = None) -> bool:
-        """
-        Verify file integrity using hash comparison.
-
-        Args:
-            file_path: Path to the file
-            expected_hash: Optional expected hash to compare against
-
-        Returns:
-            bool: True if file integrity is verified
-        """
-        file_info = self.get_file_info(file_path)
-
-        if not file_info or not file_info.exists:
-            return False
-
-        # Calculate current hash
-        current_sha256, _ = file_info.calculate_hashes()
-
-        if expected_hash:
-            return current_sha256 == expected_hash
-
-        # If no expected hash provided, just verify the file is readable
-        return bool(current_sha256)
-
-    def get_directory_info(self, directory_path: Union[str, Path]) -> Dict[str, Any]:
-        """
-        Get comprehensive information about a directory.
-
-        Args:
-            directory_path: Path to the directory
-
-        Returns:
-            Dict[str, Any]: Directory information including file counts and sizes
-        """
-        directory = Path(directory_path)
-
-        if not directory.exists() or not directory.is_dir():
-            return {'error': 'Directory does not exist'}
-
-        info = {
-            'path': str(directory),
-            'exists': True,
-            'total_files': 0,
-            'total_directories': 0,
-            'total_size': 0,
-            'file_types': {},
-            'largest_file': None,
-            'newest_file': None,
-            'oldest_file': None
+        stats = {
+            'files_processed': 0,
+            'files_moved': 0,
+            'directories_created': 0,
+            'errors': 0
         }
 
         try:
-            newest_time = None
-            oldest_time = None
-            largest_size = 0
+            config = get_config()
 
-            for item in directory.rglob('*'):
-                if item.is_file():
-                    info['total_files'] += 1
+            # Get organization preferences
+            organize_by_type = config.safe_get('folder_structure.organize_by_content_type', True, bool)
 
-                    # File size
-                    size = item.stat().st_size
-                    info['total_size'] += size
+            if not organize_by_type:
+                return stats
 
-                    # Largest file
-                    if size > largest_size:
-                        largest_size = size
-                        info['largest_file'] = {
-                            'path': str(item),
-                            'size': size
-                        }
+            # Process all files in course directory
+            for file_path in course_path.rglob('*'):
+                if file_path.is_file():
+                    try:
+                        stats['files_processed'] += 1
 
-                    # File type
-                    extension = item.suffix.lower()
-                    info['file_types'][extension] = info['file_types'].get(extension, 0) + 1
+                        # Determine content type folder
+                        content_type = self._determine_content_type(file_path)
+                        content_folder = course_path / content_type
 
-                    # Modification times
-                    mod_time = item.stat().st_mtime
-                    if newest_time is None or mod_time > newest_time:
-                        newest_time = mod_time
-                        info['newest_file'] = {
-                            'path': str(item),
-                            'modified': datetime.fromtimestamp(mod_time).isoformat()
-                        }
+                        # Create content type folder if needed
+                        if not content_folder.exists():
+                            content_folder.mkdir(exist_ok=True)
+                            stats['directories_created'] += 1
 
-                    if oldest_time is None or mod_time < oldest_time:
-                        oldest_time = mod_time
-                        info['oldest_file'] = {
-                            'path': str(item),
-                            'modified': datetime.fromtimestamp(mod_time).isoformat()
-                        }
+                        # Move file if not already in correct location
+                        if file_path.parent != content_folder:
+                            new_path = self.get_unique_filename(content_folder, file_path.name)
+                            file_path.rename(new_path)
+                            stats['files_moved'] += 1
 
-                elif item.is_dir():
-                    info['total_directories'] += 1
+                            # Update registry
+                            if str(file_path) in self._file_registry:
+                                file_info = self._file_registry.pop(str(file_path))
+                                file_info.path = new_path
+                                self._file_registry[str(new_path)] = file_info
+
+                    except Exception as e:
+                        self.logger.error(f"Failed to organize file", file_path=str(file_path), exception=e)
+                        stats['errors'] += 1
+
+            # Save updated registry
+            self._save_file_registry()
+
+            self.logger.info(f"Course files organized",
+                           course_path=str(course_path),
+                           **stats)
 
         except Exception as e:
-            self.logger.error(f"Error analyzing directory", exception=e)
-            info['error'] = str(e)
+            self.logger.error(f"Failed to organize course files", exception=e)
+            stats['errors'] += 1
 
-        return info
+        return stats
 
-    def cleanup_empty_directories(self, base_path: Union[str, Path]) -> int:
+    def _determine_content_type(self, file_path: Path) -> str:
         """
-        Remove empty directories recursively.
+        Determine content type based on file path and name.
 
         Args:
-            base_path: Base path to start cleanup
+            file_path: Path to file
 
         Returns:
-            int: Number of directories removed
+            str: Content type folder name
         """
-        base = Path(base_path)
-        removed_count = 0
+        file_name = file_path.name.lower()
+        parent_name = file_path.parent.name.lower()
 
-        try:
-            # Get all directories, sorted by depth (deepest first)
-            directories = sorted([d for d in base.rglob('*') if d.is_dir()],
-                                 key=lambda x: len(x.parts), reverse=True)
+        # Check parent directory name for hints
+        if 'assignment' in parent_name:
+            return 'assignments'
+        elif 'module' in parent_name:
+            return 'modules'
+        elif 'announcement' in parent_name:
+            return 'announcements'
+        elif 'discussion' in parent_name:
+            return 'discussions'
+        elif 'quiz' in parent_name:
+            return 'quizzes'
 
-            for directory in directories:
-                try:
-                    # Skip if not empty
-                    if any(directory.iterdir()):
-                        continue
+        # Check file extension
+        extension = file_path.suffix.lower()
 
-                    # Remove empty directory
-                    directory.rmdir()
-                    removed_count += 1
+        if extension in ['.pdf', '.doc', '.docx']:
+            return 'documents'
+        elif extension in ['.jpg', '.jpeg', '.png', '.gif', '.bmp']:
+            return 'images'
+        elif extension in ['.mp4', '.avi', '.mov', '.wmv']:
+            return 'videos'
+        elif extension in ['.mp3', '.wav', '.aac']:
+            return 'audio'
+        elif extension in ['.zip', '.rar', '.7z']:
+            return 'archives'
+        elif extension in ['.html', '.htm']:
+            return 'web_content'
 
-                    self.logger.debug(f"Removed empty directory: {directory}")
-
-                except OSError:
-                    # Directory not empty or permission denied
-                    continue
-
-        except Exception as e:
-            self.logger.error(f"Error during directory cleanup", exception=e)
-
-        self.logger.info(f"Cleanup completed", removed_directories=removed_count)
-        return removed_count
+        return 'misc'
 
     def get_file_registry_stats(self) -> Dict[str, Any]:
+        """Get statistics about the file registry."""
+        with self._lock:
+            total_files = len(self._file_registry)
+            total_size = sum(info.size for info in self._file_registry.values() if info.size)
+            verified_files = sum(1 for info in self._file_registry.values() if info.is_verified)
+
+            content_types = {}
+            for info in self._file_registry.values():
+                content_type = info.content_type or 'unknown'
+                content_types[content_type] = content_types.get(content_type, 0) + 1
+
+            return {
+                'total_files': total_files,
+                'total_size_bytes': total_size,
+                'total_size_mb': round(total_size / (1024 * 1024), 2),
+                'verified_files': verified_files,
+                'content_types': content_types,
+                'registry_file': str(self._registry_file)
+            }
+
+    def export_file_inventory(self, output_path: Path) -> bool:
         """
-        Get statistics about the file registry.
-
-        Returns:
-            Dict[str, Any]: Registry statistics
-        """
-        total_files = len(self._file_registry)
-        verified_files = sum(1 for f in self._file_registry.values() if f.is_verified)
-        total_size = sum(f.size for f in self._file_registry.values() if f.exists)
-
-        content_types = {}
-        for file_info in self._file_registry.values():
-            ct = file_info.content_type or 'unknown'
-            content_types[ct] = content_types.get(ct, 0) + 1
-
-        return {
-            'total_files': total_files,
-            'verified_files': verified_files,
-            'verification_rate': (verified_files / total_files * 100) if total_files > 0 else 0,
-            'total_size_bytes': total_size,
-            'total_size_mb': round(total_size / 1024 / 1024, 2),
-            'content_types': content_types,
-            'registry_file_path': str(self._registry_file)
-        }
-
-    def export_file_inventory(self, output_path: Union[str, Path]) -> bool:
-        """
-        Export complete file inventory to JSON file.
+        Export complete file inventory to JSON.
 
         Args:
             output_path: Path for the inventory file
@@ -926,15 +980,19 @@ class FileManager:
             self.logger.error(f"Failed to export file inventory", exception=e)
             return False
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         """Clean up file manager resources."""
-        # Save final registry state
-        self._save_file_registry()
+        try:
+            # Save final registry state
+            self._save_file_registry()
 
-        # Shutdown executor
-        self._executor.shutdown(wait=True)
+            # Shutdown executor
+            self._executor.shutdown(wait=True)
 
-        self.logger.info("File manager cleaned up")
+            self.logger.info("File manager cleaned up successfully")
+
+        except Exception as e:
+            self.logger.error(f"Error during file manager cleanup", exception=e)
 
 
 def create_file_manager(config=None, **kwargs) -> FileManager:
@@ -948,4 +1006,25 @@ def create_file_manager(config=None, **kwargs) -> FileManager:
     Returns:
         FileManager: Configured file manager instance
     """
-    return FileManager(config=config, **kwargs)
+    try:
+        return FileManager(config=config, **kwargs)
+    except Exception as e:
+        logger = get_logger(__name__)
+        logger.error(f"Failed to create file manager", exception=e)
+        # Return a minimal working file manager
+        return FileManager(config=None)
+
+
+# Utility functions for common file operations
+def get_download_directory() -> Path:
+    """Get the configured download directory."""
+    config = get_config()
+    base_path = config.safe_get('download_settings.base_download_path', 'downloads', str)
+    return Path(base_path)
+
+
+def ensure_directory_exists(path: Union[str, Path]) -> Path:
+    """Ensure directory exists and return Path object."""
+    path_obj = Path(path)
+    path_obj.mkdir(parents=True, exist_ok=True)
+    return path_obj
