@@ -254,7 +254,7 @@ class CanvasOrchestrator:
                 api_url=credentials['api_url'],
                 api_key=credentials['api_key'],
                 timeout=self.config.download_settings.timeout,
-                max_retries=self.config.download_settings.retry_attempts
+                max_retries=self.config.safe_get('download_settings.max_retries', 3, int)
             )
 
             # Test connection

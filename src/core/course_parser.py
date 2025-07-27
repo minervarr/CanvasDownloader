@@ -102,6 +102,200 @@ class ParsedCourse:
         }
 
 
+# Add this dataclass at the top of src/core/course_parser.py (after the existing ParsedCourse dataclass)
+
+@dataclass
+class ParsedCourseName:
+    """
+    Simple parsed course name structure for orchestrator compatibility.
+
+    This class represents the parsed components of a Canvas course name
+    with the specific attributes expected by the orchestrator.
+    """
+    subject_name: str = ""
+    subject_code: str = ""
+    subsection: str = ""
+    year: str = ""
+    semester: str = ""
+    folder_name: str = ""
+    folder_path: str = ""
+    is_parsed_successfully: bool = False
+    full_name: str = ""
+
+
+# Add this method to the CourseParser class in src/core/course_parser.py
+
+def parse_course_name(self, course_name: str, course_id: str) -> ParsedCourseName:
+    """
+    Parse course name into components for orchestrator compatibility.
+
+    Expected format: "Subject name (CODE) - Subsection - Year - Semester"
+    Example: "Arte y Tecnología (HH3101) - Teoría 1 - 2025 - 1"
+
+    Args:
+        course_name: Full course name from Canvas
+        course_id: Course ID for folder naming
+
+    Returns:
+        ParsedCourseName: Parsed course components with folder paths
+    """
+    try:
+        self.logger.debug(f"Parsing course name: {course_name}")
+
+        # Initialize result with defaults
+        result = ParsedCourseName()
+        result.full_name = course_name
+        result.subject_name = course_name  # Default fallback
+
+        # Regular expression patterns for parsing
+        # Pattern 1: Full format - Subject (CODE) - Section - Year - Semester
+        full_pattern = r'^(.+?)\s*\(([^)]+)\)\s*-\s*(.+?)\s*-\s*(\d{4})\s*-\s*(.+)$'
+        full_match = re.match(full_pattern, course_name.strip())
+
+        if full_match:
+            result.subject_name = full_match.group(1).strip()
+            result.subject_code = full_match.group(2).strip()
+            result.subsection = full_match.group(3).strip()
+            result.year = full_match.group(4).strip()
+            result.semester = full_match.group(5).strip()
+            result.is_parsed_successfully = True
+
+            self.logger.debug(f"Full pattern matched for course {course_id}")
+
+        else:
+            # Pattern 2: Simple format - Subject (CODE)
+            simple_pattern = r'^(.+?)\s*\(([^)]+)\)(.*)$'
+            simple_match = re.match(simple_pattern, course_name.strip())
+
+            if simple_match:
+                result.subject_name = simple_match.group(1).strip()
+                result.subject_code = simple_match.group(2).strip()
+
+                # Try to extract additional info from remainder
+                remainder = simple_match.group(3).strip()
+                if remainder:
+                    # Split by dashes and try to identify components
+                    parts = [part.strip() for part in remainder.split('-') if part.strip()]
+                    for part in parts:
+                        if re.match(r'^\d{4}$', part):  # Year (4 digits)
+                            result.year = part
+                        elif re.match(r'^[12]$', part):  # Semester (1 or 2)
+                            result.semester = part
+                        elif not result.subsection:  # First non-year/semester part
+                            result.subsection = part
+
+                result.is_parsed_successfully = True
+                self.logger.debug(f"Simple pattern matched for course {course_id}")
+
+            else:
+                # Pattern 3: No parentheses - just plain text
+                result.subject_name = course_name.strip()
+                result.is_parsed_successfully = False
+                self.logger.debug(f"No pattern matched for course {course_id}, using fallback")
+
+        # Generate folder name and path
+        result.folder_name = self._generate_course_folder_name(result, course_id)
+        result.folder_path = result.folder_name
+
+        self.logger.debug(f"Course parsing completed",
+                          course_id=course_id,
+                          parsed_successfully=result.is_parsed_successfully,
+                          folder_name=result.folder_name)
+
+        return result
+
+    except Exception as e:
+        self.logger.error(f"Failed to parse course name '{course_name}'",
+                          course_id=course_id, exception=e)
+
+        # Return safe fallback
+        result = ParsedCourseName()
+        result.full_name = course_name
+        result.subject_name = course_name
+        result.folder_name = self._sanitize_folder_name(f"Course_{course_id}")
+        result.folder_path = result.folder_name
+        result.is_parsed_successfully = False
+
+        return result
+
+
+def _generate_course_folder_name(self, parsed_course: ParsedCourseName, course_id: str) -> str:
+    """
+    Generate a safe folder name for the course.
+
+    Args:
+        parsed_course: Parsed course information
+        course_id: Course ID for fallback
+
+    Returns:
+        str: Safe folder name
+    """
+    try:
+        # Try different naming strategies based on available information
+        if parsed_course.subject_code and parsed_course.subject_name:
+            # Best case: CODE - Subject Name
+            folder_name = f"{parsed_course.subject_code} - {parsed_course.subject_name}"
+
+            # Add year and semester if available
+            if parsed_course.year and parsed_course.semester:
+                folder_name += f" - {parsed_course.year}-{parsed_course.semester}"
+
+        elif parsed_course.subject_code:
+            # Just the course code
+            folder_name = parsed_course.subject_code
+
+        elif parsed_course.subject_name:
+            # Just the subject name
+            folder_name = parsed_course.subject_name
+
+        else:
+            # Fallback to course ID
+            folder_name = f"Course_{course_id}"
+
+        # Sanitize the folder name
+        return self._sanitize_folder_name(folder_name)
+
+    except Exception as e:
+        self.logger.warning(f"Failed to generate folder name for course {course_id}", exception=e)
+        return self._sanitize_folder_name(f"Course_{course_id}")
+
+
+def _sanitize_folder_name(self, name: str, max_length: int = 100) -> str:
+    """
+    Sanitize a string for use as a folder name.
+
+    Args:
+        name: Original name
+        max_length: Maximum allowed length
+
+    Returns:
+        str: Sanitized folder name
+    """
+    if not name:
+        return "Unknown"
+
+    # Replace problematic characters
+    import re
+
+    # Replace invalid characters with underscores
+    sanitized = re.sub(r'[<>:"/\\|?*]', '_', name)
+
+    # Replace multiple spaces/underscores with single underscore
+    sanitized = re.sub(r'[\s_]+', '_', sanitized)
+
+    # Remove leading/trailing underscores and spaces
+    sanitized = sanitized.strip('_').strip()
+
+    # Truncate if too long
+    if len(sanitized) > max_length:
+        sanitized = sanitized[:max_length].rstrip('_')
+
+    # Ensure it's not empty
+    if not sanitized:
+        sanitized = "Unknown"
+
+    return sanitized
+
 class CourseParser:
     """
     Canvas Course Information Parser

@@ -39,6 +39,7 @@ The CLI guides users through:
 """
 
 import asyncio
+import getpass  # Add this with other imports
 import sys
 import signal
 from typing import Dict, List, Any, Optional, Tuple
@@ -65,7 +66,7 @@ from ..config.sessions import SessionManager, get_session_manager
 from ..config.settings import get_config
 from ..utils.logger import get_logger, setup_logging
 from ..utils.progress import ProgressTracker, create_progress_tracker
-
+from ..utils.gui_helpers import get_secure_input
 
 class CanvasDownloaderCLI:
     """
@@ -399,27 +400,53 @@ class CanvasDownloaderCLI:
                 self._wait_for_enter()
 
     async def _add_new_session(self):
-        """Add a new Canvas session."""
+        """Add a new Canvas session with GUI popup for API key."""
         self._print_header("Add New Canvas Session")
 
         try:
             if self.use_rich:
                 session_name = Prompt.ask("Session name (e.g., 'My University')")
                 api_url = Prompt.ask("Canvas URL (e.g., https://canvas.university.edu)")
-                api_key = Prompt.ask("API Key", password=True)
-                institution_name = Prompt.ask("Institution name (optional)", default="")
 
+                # Use GUI popup for API key instead of Rich password input
+                self._print("Opening secure input dialog for API key...")
+                api_key = get_secure_input(
+                    prompt="Please enter your Canvas API key.\n\nYou can find this in Canvas under:\nAccount → Settings → Approved Integrations → New Access Token",
+                    title="Canvas API Key Required",
+                    placeholder="paste-your-canvas-api-key-here"
+                )
+
+                if not api_key:
+                    self._print_error("❌ API key is required. Session creation cancelled.")
+                    return
+
+                institution_name = Prompt.ask("Institution name (optional)", default="")
                 validate = Confirm.ask("Test connection before saving?", default=True)
+
             else:
+                # Terminal-only interface with GUI popup for API key
                 session_name = input("Session name (e.g., 'My University'): ")
                 api_url = input("Canvas URL (e.g., https://canvas.university.edu): ")
-                api_key = input("API Key: ")
+
+                print("\n🔐 Opening secure dialog for API key input...")
+                print("   (A popup window will appear for secure entry)")
+
+                api_key = get_secure_input(
+                    prompt="Please enter your Canvas API key.\n\nYou can find this in Canvas under:\nAccount → Settings → Approved Integrations → New Access Token",
+                    title="Canvas API Key Required",
+                    placeholder="paste-your-canvas-api-key-here"
+                )
+
+                if not api_key:
+                    print("❌ API key is required. Session creation cancelled.")
+                    return
+
                 institution_name = input("Institution name (optional): ")
 
                 validate_input = input("Test connection before saving? (y/n): ").lower()
                 validate = validate_input in ['y', 'yes', '']
 
-            # Add session
+            # Add session (rest of the method remains the same)
             success = self.session_manager.add_session(
                 session_name=session_name,
                 api_url=api_url,
@@ -433,6 +460,8 @@ class CanvasDownloaderCLI:
             else:
                 self._print_error("❌ Failed to add session. Please check your credentials.")
 
+        except KeyboardInterrupt:
+            self._print_error("❌ Session creation cancelled by user.")
         except Exception as e:
             self.logger.error(f"Failed to add session", exception=e)
             self._print_error(f"Error adding session: {e}")
@@ -813,7 +842,7 @@ class CanvasDownloaderCLI:
 📡 Session: {self.current_session}
 📚 Courses: {len(self.selected_courses)} selected
 📋 Content Types: {', '.join(sorted(self.enabled_content_types))}
-📁 Download Path: {self.config.get_download_path()}
+📁 Download Path: {self.config.safe_get('paths.downloads_folder', 'downloads', str)}
             """.strip()
 
             panel = Panel(info_text, title="Download Configuration", border_style="yellow")
@@ -1141,29 +1170,203 @@ For example:
             self._print_error(f"Failed to check availability: {e}")
 
     async def _edit_session(self):
-        """Edit an existing session."""
-        self._print("✏️ Session editing coming soon!")
+        """Edit an existing session with GUI popup for API key changes."""
+        sessions = self.session_manager.list_sessions()
+        if not sessions:
+            self._print_error("No sessions available to edit.")
+            return
+
+        self._print_header("Edit Canvas Session")
+
+        try:
+            # Session selection (same as before)
+            if self.use_rich:
+                session_names = [s['session_name'] for s in sessions]
+                session_name = Prompt.ask("Select session to edit", choices=session_names)
+            else:
+                print("Available Sessions:")
+                for i, session in enumerate(sessions, 1):
+                    print(f"{i}. {session['session_name']}")
+                print()
+
+                while True:
+                    try:
+                        choice = int(input("Select session number: "))
+                        if 1 <= choice <= len(sessions):
+                            session_name = sessions[choice - 1]['session_name']
+                            break
+                        else:
+                            print("Invalid choice. Please try again.")
+                    except ValueError:
+                        print("Please enter a valid number.")
+
+            # Load current session details
+            current_credentials = self.session_manager.encryption_manager.load_session(session_name)
+            sessions_list = self.session_manager.encryption_manager.list_sessions()
+            current_session = next(s for s in sessions_list if s['session_name'] == session_name)
+
+            print(f"\nCurrent session details:")
+            print(f"  Name: {session_name}")
+            print(f"  URL: {current_credentials['api_url']}")
+            print(f"  Institution: {current_session.get('institution_name', 'Not set')}")
+            print(f"  API Key: {'*' * 20} (hidden)")
+            print()
+
+            # Get updates
+            if self.use_rich:
+                new_session_name = Prompt.ask("New session name", default=session_name)
+                new_api_url = Prompt.ask("New Canvas URL", default=current_credentials['api_url'])
+
+                # Ask if user wants to update API key
+                update_api_key = Confirm.ask("Update API key?", default=False)
+                new_api_key = None
+
+                if update_api_key:
+                    self._print("Opening secure input dialog for new API key...")
+                    new_api_key = get_secure_input(
+                        prompt="Please enter your new Canvas API key:",
+                        title="Update Canvas API Key",
+                        placeholder="paste-your-new-api-key-here"
+                    )
+                    if not new_api_key:
+                        self._print_error("❌ API key update cancelled.")
+                        return
+
+                new_institution_name = Prompt.ask("Institution name",
+                                                  default=current_session.get('institution_name', ''))
+                validate = Confirm.ask("Test connection before saving?", default=True)
+
+            else:
+                new_session_name = input(f"New session name [{session_name}]: ").strip() or session_name
+                new_api_url = input(f"New Canvas URL [{current_credentials['api_url']}]: ").strip() or \
+                              current_credentials['api_url']
+
+                update_api_key = input("Update API key? (y/n): ").lower() in ['y', 'yes']
+                new_api_key = None
+
+                if update_api_key:
+                    print("\n🔐 Opening secure dialog for new API key...")
+                    new_api_key = get_secure_input(
+                        prompt="Please enter your new Canvas API key:",
+                        title="Update Canvas API Key",
+                        placeholder="paste-your-new-api-key-here"
+                    )
+                    if not new_api_key:
+                        print("❌ API key update cancelled.")
+                        return
+
+                new_institution_name = input(
+                    f"Institution name [{current_session.get('institution_name', '')}]: ").strip()
+                if not new_institution_name:
+                    new_institution_name = current_session.get('institution_name', '')
+
+                validate_input = input("Test connection before saving? (y/n): ").lower()
+                validate = validate_input in ['y', 'yes', '']
+
+            # Update session
+            success = self.session_manager.update_session(
+                session_name=session_name,
+                new_session_name=new_session_name if new_session_name != session_name else None,
+                api_url=new_api_url if new_api_url != current_credentials['api_url'] else None,
+                api_key=new_api_key,
+                institution_name=new_institution_name,
+                validate_connection=validate
+            )
+
+            if success:
+                self._print_success(f"✅ Session updated successfully!")
+            else:
+                self._print_error("❌ Failed to update session.")
+
+        except KeyboardInterrupt:
+            self._print_error("❌ Session editing cancelled by user.")
+        except Exception as e:
+            self.logger.error(f"Failed to edit session", exception=e)
+            self._print_error(f"Error editing session: {e}")
 
     async def _delete_session(self):
         """Delete an existing session."""
         self._print("🗑️ Session deletion coming soon!")
 
     async def _test_connection(self):
-        """Test connection to current session."""
-        if not self.current_session:
-            self._print_error("No session selected.")
-            return
+        """Test Canvas API connection with option to enter new credentials via GUI."""
+        self._print_header("Test Canvas Connection")
 
-        self._print("🔍 Testing connection...")
         try:
-            # Re-initialize to test
-            success = await self.orchestrator.initialize_session(self.current_session)
-            if success:
-                self._print_success("✅ Connection successful!")
+            # Option 1: Test existing session
+            sessions = self.session_manager.list_sessions()
+
+            if self.use_rich:
+                choices = ["Enter new credentials"]
+                if sessions:
+                    choices.extend([s['session_name'] for s in sessions])
+
+                choice = Prompt.ask("Select option", choices=choices)
+
+                if choice == "Enter new credentials":
+                    api_url = Prompt.ask("Canvas URL")
+                    self._print("Opening secure input dialog for API key...")
+                    api_key = get_secure_input(
+                        prompt="Please enter your Canvas API key for testing:",
+                        title="Test Canvas Connection",
+                        placeholder="paste-your-api-key-here"
+                    )
+                else:
+                    session_name = choice
+                    credentials = self.session_manager.encryption_manager.load_session(session_name)
+                    api_url = credentials['api_url']
+                    api_key = credentials['api_key']
+
             else:
-                self._print_error("❌ Connection failed.")
+                print("Test Options:")
+                print("1. Enter new credentials")
+                if sessions:
+                    for i, session in enumerate(sessions, 2):
+                        print(f"{i}. Test '{session['session_name']}'")
+                print()
+
+                max_choice = 1 + len(sessions)
+                while True:
+                    try:
+                        choice = int(input("Select option: "))
+                        if choice == 1:
+                            api_url = input("Canvas URL: ")
+                            print("\n🔐 Opening secure dialog for API key...")
+                            api_key = get_secure_input(
+                                prompt="Please enter your Canvas API key for testing:",
+                                title="Test Canvas Connection",
+                                placeholder="paste-your-api-key-here"
+                            )
+                            break
+                        elif 2 <= choice <= max_choice and sessions:
+                            session_name = sessions[choice - 2]['session_name']
+                            credentials = self.session_manager.encryption_manager.load_session(session_name)
+                            api_url = credentials['api_url']
+                            api_key = credentials['api_key']
+                            break
+                        else:
+                            print("Invalid choice. Please try again.")
+                    except ValueError:
+                        print("Please enter a valid number.")
+
+            if not api_key:
+                self._print_error("❌ API key is required for testing.")
+                return
+
+            # Test the connection
+            self._print("🔄 Testing connection...")
+            success, message = self.session_manager.test_api_connection(api_url, api_key)
+
+            if success:
+                self._print_success(f"✅ {message}")
+            else:
+                self._print_error(f"❌ {message}")
+
+        except KeyboardInterrupt:
+            self._print_error("❌ Connection test cancelled by user.")
         except Exception as e:
-            self._print_error(f"Connection test failed: {e}")
+            self.logger.error(f"Failed to test connection", exception=e)
+            self._print_error(f"Error testing connection: {e}")
 
     async def _cleanup(self):
         """Clean up CLI resources."""
