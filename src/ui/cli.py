@@ -119,26 +119,37 @@ class CanvasDownloaderCLI:
 
     def _initialize_content_types(self):
         """Initialize default content types from configuration."""
-        content_config = self.config.content_types
+        try:
+            # Use safe_get method to avoid AttributeError
+            if self.config.safe_get('content_types.announcements.enabled', True, bool):
+                self.enabled_content_types.add('announcements')
+            if self.config.safe_get('content_types.assignments.enabled', True, bool):
+                self.enabled_content_types.add('assignments')
+            if self.config.safe_get('content_types.discussions.enabled', True, bool):
+                self.enabled_content_types.add('discussions')
+            if self.config.safe_get('content_types.files.enabled', True, bool):
+                self.enabled_content_types.add('files')
+            if self.config.safe_get('content_types.modules.enabled', True, bool):
+                self.enabled_content_types.add('modules')
+            if self.config.safe_get('content_types.quizzes.enabled', True, bool):
+                self.enabled_content_types.add('quizzes')
+            if self.config.safe_get('content_types.grades.enabled', True, bool):
+                self.enabled_content_types.add('grades')
+            if self.config.safe_get('content_types.people.enabled', True, bool):
+                self.enabled_content_types.add('people')
+            if self.config.safe_get('content_types.chat.enabled', True, bool):
+                self.enabled_content_types.add('chat')
 
-        if content_config.announcements:
-            self.enabled_content_types.add('announcements')
-        if content_config.assignments:
-            self.enabled_content_types.add('assignments')
-        if content_config.discussions:
-            self.enabled_content_types.add('discussions')
-        if content_config.files:
-            self.enabled_content_types.add('files')
-        if content_config.modules:
-            self.enabled_content_types.add('modules')
-        if content_config.quizzes:
-            self.enabled_content_types.add('quizzes')
-        if content_config.grades:
-            self.enabled_content_types.add('grades')
-        if content_config.people:
-            self.enabled_content_types.add('people')
-        if content_config.chat:
-            self.enabled_content_types.add('chat')
+            self.logger.debug(f"Initialized content types: {self.enabled_content_types}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to initialize content types", exception=e)
+            # Safe fallback - enable common content types
+            self.enabled_content_types = {
+                'announcements', 'assignments', 'discussions',
+                'files', 'modules', 'quizzes'
+            }
+            self.logger.warning("Using fallback content types")
 
     def run(self) -> int:
         """

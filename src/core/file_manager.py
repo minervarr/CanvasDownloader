@@ -57,6 +57,7 @@ import threading
 
 from ..config.settings import get_config
 from ..utils.logger import get_logger
+from ..config.constants import get_config_default_and_type
 
 
 @dataclass
@@ -358,8 +359,11 @@ class FileManager:
                         verify_files=self.verify_files)
 
     def _initialize_paths(self) -> None:
-        """Initialize file paths with multiple fallback strategies."""
+        '''Initialize file paths with multiple fallback strategies.'''
         try:
+            # Get default and type for base_download_path
+            DEFAULT_VALUE, EXPECTED_TYPE = get_config_default_and_type('download_settings.base_download_path')
+
             # Try multiple ways to get the base download path
             base_path = None
 
@@ -372,17 +376,17 @@ class FileManager:
 
             # Method 2: Dot notation with safe_get
             if base_path is None:
-                base_path = self.config.safe_get('download_settings.base_download_path', 'downloads', str)
+                base_path = self.config.safe_get('download_settings.base_download_path', DEFAULT_VALUE, EXPECTED_TYPE)
                 self.logger.debug("Got base path via safe_get")
 
             # Method 3: Regular get method
             if base_path is None:
-                base_path = self.config.get('download_settings.base_download_path', 'downloads')
+                base_path = self.config.get('download_settings.base_download_path', DEFAULT_VALUE)
                 self.logger.debug("Got base path via get method")
 
             # Method 4: Absolute fallback
             if base_path is None:
-                base_path = 'downloads'
+                base_path = DEFAULT_VALUE
                 self.logger.warning("Using absolute fallback for base path")
 
             # Convert to Path and create directory
@@ -399,8 +403,14 @@ class FileManager:
             self.logger.warning("Using emergency fallback path: downloads")
 
     def _initialize_settings(self) -> None:
-        """Initialize file operation settings with safe defaults."""
+        '''Initialize file operation settings with safe defaults.'''
         try:
+            # Get defaults and types for all settings
+            verify_default, verify_type = get_config_default_and_type('download_settings.verify_downloads')
+            retries_default, retries_type = get_config_default_and_type('download_settings.max_retries')
+            timeout_default, timeout_type = get_config_default_and_type('download_settings.timeout')
+            skip_default, skip_type = get_config_default_and_type('download_settings.skip_existing')
+
             # Get settings with multiple access methods and safe defaults
 
             # Chunk size
@@ -411,36 +421,38 @@ class FileManager:
 
             # Verify files
             try:
-                self.verify_files = self.config.safe_get('download_settings.verify_downloads', DEFAULT_VALUE, EXPECTED_TYPE)
+                self.verify_files = self.config.safe_get('download_settings.verify_downloads', verify_default,
+                                                         verify_type)
             except AttributeError:
-                self.verify_files = self.config.safe_get('download_settings.verify_downloads', True, bool)
+                self.verify_files = self.config.safe_get('download_settings.verify_downloads', verify_default,
+                                                         verify_type)
 
             # Max retries
             try:
-                self.max_retries = self.config.safe_get('download_settings.max_retries', DEFAULT_VALUE, EXPECTED_TYPE)
+                self.max_retries = self.config.safe_get('download_settings.max_retries', retries_default, retries_type)
             except AttributeError:
-                self.max_retries = self.config.safe_get('download_settings.max_retries', 3, int)
+                self.max_retries = self.config.safe_get('download_settings.max_retries', retries_default, retries_type)
 
             # Timeout
             try:
-                self.timeout = self.config.safe_get('download_settings.timeout', DEFAULT_VALUE, EXPECTED_TYPE)
+                self.timeout = self.config.safe_get('download_settings.timeout', timeout_default, timeout_type)
             except AttributeError:
-                self.timeout = self.config.safe_get('download_settings.timeout', 30, int)
+                self.timeout = self.config.safe_get('download_settings.timeout', timeout_default, timeout_type)
 
             # Skip existing
             try:
-                self.skip_existing = self.config.safe_get('download_settings.skip_existing', DEFAULT_VALUE, EXPECTED_TYPE)
+                self.skip_existing = self.config.safe_get('download_settings.skip_existing', skip_default, skip_type)
             except AttributeError:
-                self.skip_existing = self.config.safe_get('download_settings.skip_existing', True, bool)
+                self.skip_existing = self.config.safe_get('download_settings.skip_existing', skip_default, skip_type)
 
             # Additional settings
             self.atomic_operations = True
             self.preserve_timestamps = True
 
             self.logger.debug("File operation settings initialized",
-                            chunk_size=self.chunk_size,
-                            verify_files=self.verify_files,
-                            max_retries=self.max_retries)
+                              chunk_size=self.chunk_size,
+                              verify_files=self.verify_files,
+                              max_retries=self.max_retries)
 
         except Exception as e:
             self.logger.error(f"Failed to initialize settings", exception=e)
